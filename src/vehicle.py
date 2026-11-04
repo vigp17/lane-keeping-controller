@@ -31,3 +31,11 @@ class Vehicle:
         self.yaw += (
             velocity / self.wheelbase
         ) * np.tan(steering_angle) * dt
+
+    def get_front_axle_position(self) -> tuple[float, float]:
+
+        front_x = self.x + self.wheelbase * np.cos(self.yaw)
+
+        front_y = self.y + self.wheelbase * np.sin(self.yaw)
+
+        return float(front_x), float(front_y)
