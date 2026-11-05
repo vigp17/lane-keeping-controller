@@ -51,7 +51,7 @@ VEHICLE_BLUEPRINT_ID: str = "vehicle.tesla.model3"
 COLLISION_SENSOR_BP_ID: str = "sensor.other.collision"
 
 FIXED_DELTA_SECONDS: float = 0.05
-TARGET_SPEED_MPS: float = 5.0
+TARGET_SPEED_MPS: float = 8.0
 
 STANLEY_GAIN: float = 1.5
 STANLEY_EPSILON: float = 1e-3
@@ -63,19 +63,23 @@ MAX_STEERING_RATE_DEG_S: float = 20.0
 MAX_STEERING_RATE_RAD_S: float = float(np.radians(MAX_STEERING_RATE_DEG_S))
 
 WAYPOINT_SPACING_M: float = 0.5
-ROUTE_DISTANCE_M: float = 65.0
+ROUTE_DISTANCE_M: float = 138.0
+MIN_EXTENDED_ROUTE_LENGTH_M: float = 120.0
 MAX_STEP_YAW_CHANGE_DEG: float = 3.0
-MAX_TOTAL_ROUTE_YAW_DEG: float = 20.0
+MAX_TOTAL_ROUTE_YAW_DEG: float = 100.0
+CURVATURE_THRESHOLD_1PM: float = 0.005
+PREFERRED_SPAWN_POINT_INDEX: int = 61
 
 ENDPOINT_TOLERANCE_M: float = 1.5
 MAX_ALLOWED_CTE_M: float = 2.5
-MAX_SIMULATION_DURATION_S: float = 25.0
+MAX_SIMULATION_DURATION_S: float = 35.0
 
 SETTLE_TICKS: int = 10
 STOP_BRAKE_TICKS: int = 20
 
 RESULTS_DIR: Path = Path(__file__).resolve().parents[2] / "results"
-DEFAULT_CSV_PATH: Path = RESULTS_DIR / "stanley_carla_telemetry.csv"
+DEFAULT_FILE_PREFIX: str = "stanley_carla_extended_8ms"
+DEFAULT_CSV_PATH: Path = RESULTS_DIR / f"{DEFAULT_FILE_PREFIX}_telemetry.csv"
 
 
 # ==================================================
@@ -112,6 +116,29 @@ class TelemetrySample:
     normalized_carla_steer: float
     throttle: float
     brake: float
+    road_curvature_1pm: float = 0.0
+    route_progress_m: float = 0.0
+    route_progress_pct: float = 0.0
+
+
+@dataclass(frozen=True)
+class SegmentPerformanceMetrics:
+    """Tracking and steering performance metrics for a route segment."""
+
+    segment_name: str
+    sample_count: int
+    distance_m: float
+    mean_speed_mps: float
+    max_speed_mps: float
+    front_cte_rmse_m: float
+    max_front_cte_m: float
+    rear_axle_rmse_m: float
+    max_rear_axle_error_m: float
+    max_heading_error_deg: float
+    steering_rms_deg: float
+    max_applied_steering_deg: float
+    max_steering_rate_deg_s: float
+    steering_rate_rms_deg_s: float
 
 
 @dataclass(frozen=True)
@@ -130,6 +157,10 @@ class RouteDetails:
     start_y_ctrl: float
     end_x_ctrl: float
     end_y_ctrl: float
+    straight_length_m: float = 0.0
+    curved_length_m: float = 0.0
+    max_abs_curvature_1pm: float = 0.0
+    min_turn_radius_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -166,6 +197,8 @@ class StanleyCarlaTestSummary:
     non_finite_values: int
     csv_path: Path
     plot_paths: dict[str, Path]
+    steering_rms_deg: float = 0.0
+    segment_metrics: dict[str, SegmentPerformanceMetrics] | None = None
 
 
 # ==================================================
@@ -309,10 +342,38 @@ class ConservativeLongitudinalController:
 # 4. ROUTE EXTRACTION & CONTINUITY VERIFICATION
 # ==================================================
 
+def compute_route_arc_length_and_curvature(
+    road_x: NDArray[np.float64],
+    road_y: NDArray[np.float64],
+    road_yaw: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """
+    Compute cumulative route arc-length distance s (m) and signed discrete
+    road curvature kappa (m^-1) in controller coordinates.
+    """
+    rx = np.asarray(road_x, dtype=np.float64)
+    ry = np.asarray(road_y, dtype=np.float64)
+    ryaw = np.asarray(road_yaw, dtype=np.float64)
+
+    if rx.size < 2:
+        return np.zeros_like(rx), np.zeros_like(rx)
+
+    ds = np.hypot(np.diff(rx), np.diff(ry))
+    road_s = np.concatenate([[0.0], np.cumsum(ds)]).astype(np.float64)
+
+    dyaw = np.arctan2(np.sin(np.diff(ryaw)), np.cos(np.diff(ryaw)))
+    road_curvature = np.zeros_like(rx, dtype=np.float64)
+    road_curvature[:-1] = dyaw / np.maximum(ds, 1e-6)
+    road_curvature[-1] = road_curvature[-2]
+
+    return road_s, road_curvature
+
+
 def verify_route_continuity(
     waypoints: Sequence[Any],
     expected_spacing_m: float = WAYPOINT_SPACING_M,
-    max_step_yaw_deg: float = MAX_STEP_YAW_CHANGE_DEG
+    max_step_yaw_deg: float = MAX_STEP_YAW_CHANGE_DEG,
+    allow_contiguous_road_id: bool = False
 ) -> tuple[float, float, float]:
     """
     Verify that a sequence of CARLA waypoints forms a continuous, single-lane,
@@ -353,11 +414,17 @@ def verify_route_continuity(
         curr_road_id = getattr(curr_wp, "road_id", initial_road_id)
         curr_lane_id = getattr(curr_wp, "lane_id", initial_lane_id)
 
-        if (
-            initial_road_id is not None
-            and initial_lane_id is not None
-            and (curr_road_id != initial_road_id or curr_lane_id != initial_lane_id)
-        ):
+        road_mismatch = (
+            not allow_contiguous_road_id
+            and initial_road_id is not None
+            and curr_road_id != initial_road_id
+        )
+        lane_mismatch = (
+            initial_lane_id is not None
+            and curr_lane_id != initial_lane_id
+        )
+
+        if road_mismatch or lane_mismatch:
             raise ValueError(
                 f"Discontinuous road/lane change at waypoint {idx}: "
                 f"(road={initial_road_id}, lane={initial_lane_id}) -> "
@@ -405,7 +472,8 @@ def extract_continuous_driving_route(
     start_waypoint: Any,
     distance_m: float = ROUTE_DISTANCE_M,
     spacing_m: float = WAYPOINT_SPACING_M,
-    max_step_yaw_deg: float = MAX_STEP_YAW_CHANGE_DEG
+    max_step_yaw_deg: float = MAX_STEP_YAW_CHANGE_DEG,
+    allow_contiguous_road_id: bool = False
 ) -> list[Any]:
     """
     Extract a continuous single-lane driving route forward from start_waypoint
@@ -426,13 +494,17 @@ def extract_continuous_driving_route(
         if not next_candidates:
             break
 
+        if allow_contiguous_road_id and len(next_candidates) != 1:
+            break
+
         chosen_wp = None
         for candidate in next_candidates:
             if bool(getattr(candidate, "is_junction", False)):
                 continue
             cand_road = getattr(candidate, "road_id", target_road_id)
             cand_lane = getattr(candidate, "lane_id", target_lane_id)
-            if cand_road == target_road_id and cand_lane == target_lane_id:
+            road_ok = allow_contiguous_road_id or (cand_road == target_road_id)
+            if road_ok and cand_lane == target_lane_id:
                 chosen_wp = candidate
                 break
 
@@ -445,7 +517,8 @@ def extract_continuous_driving_route(
     verify_route_continuity(
         waypoints=waypoints,
         expected_spacing_m=spacing_m,
-        max_step_yaw_deg=max_step_yaw_deg
+        max_step_yaw_deg=max_step_yaw_deg,
+        allow_contiguous_road_id=allow_contiguous_road_id
     )
     return waypoints
 
@@ -456,19 +529,28 @@ def select_spawn_point_and_route(
     route_distance_m: float = ROUTE_DISTANCE_M,
     spacing_m: float = WAYPOINT_SPACING_M,
     max_step_yaw_deg: float = MAX_STEP_YAW_CHANGE_DEG,
-    max_total_yaw_deg: float = MAX_TOTAL_ROUTE_YAW_DEG
+    max_total_yaw_deg: float = MAX_TOTAL_ROUTE_YAW_DEG,
+    preferred_spawn_point_index: int = PREFERRED_SPAWN_POINT_INDEX
 ) -> tuple[Any, list[Any], RouteDetails]:
     """
     Search map spawn points for a clean, continuous single-lane driving route
-    free of intersections and sharp turns, and spawn the Tesla Model 3.
+    free of intersections and sharp discontinuities, and spawn the Tesla Model 3.
     """
     carla_map = world.get_map()
     spawn_points = carla_map.get_spawn_points()
     if not spawn_points:
         raise RuntimeError("No spawn points available in the active CARLA map.")
 
-    expected_num_waypoints = int(round(route_distance_m / spacing_m)) + 1
-    candidates: list[tuple[float, float, int, Any, list[Any], float, float, float]] = []
+    is_extended_route = route_distance_m >= MIN_EXTENDED_ROUTE_LENGTH_M
+    min_required_length_m = (
+        MIN_EXTENDED_ROUTE_LENGTH_M
+        if is_extended_route
+        else 0.95 * route_distance_m
+    )
+
+    candidates: list[
+        tuple[int, float, float, int, Any, list[Any], float, float, float]
+    ] = []
     driving_lane_type = (
         carla.LaneType.Driving
         if carla is not None and hasattr(carla, "LaneType")
@@ -495,30 +577,33 @@ def select_spawn_point_and_route(
                 start_waypoint=start_wp,
                 distance_m=route_distance_m,
                 spacing_m=spacing_m,
-                max_step_yaw_deg=max_step_yaw_deg
+                max_step_yaw_deg=max_step_yaw_deg,
+                allow_contiguous_road_id=is_extended_route
             )
         except ValueError:
-            continue
-
-        if len(route_wps) < expected_num_waypoints:
             continue
 
         total_len, max_step_yaw, total_yaw = verify_route_continuity(
             waypoints=route_wps,
             expected_spacing_m=spacing_m,
-            max_step_yaw_deg=max_step_yaw_deg
+            max_step_yaw_deg=max_step_yaw_deg,
+            allow_contiguous_road_id=is_extended_route
         )
-        if total_yaw > max_total_yaw_deg:
+        if total_len < min_required_length_m or total_yaw > max_total_yaw_deg:
+            continue
+        if is_extended_route and len(spawn_points) > 1 and total_yaw < 45.0:
             continue
 
         sp_offset = math.hypot(
             float(sp.location.x) - float(start_wp.transform.location.x),
             float(sp.location.y) - float(start_wp.transform.location.y)
         )
+        pref_rank = 0 if sp_idx == preferred_spawn_point_index else 1
         candidates.append(
             (
-                total_yaw,
+                pref_rank,
                 sp_offset,
+                total_yaw,
                 sp_idx,
                 sp,
                 route_wps,
@@ -528,14 +613,27 @@ def select_spawn_point_and_route(
             )
         )
 
-    # Sort candidates by gentlest total heading change and closest alignment to lane center
-    candidates.sort(key=lambda item: (round(item[0], 3), round(item[1], 4), item[2]))
+    candidates.sort(
+        key=lambda item: (item[0], round(item[1], 4), round(item[2], 3), item[3])
+    )
 
-    for _, _, sp_idx, sp, route_wps, total_len, max_step_yaw, total_yaw in candidates:
+    for _, _, _, sp_idx, sp, route_wps, total_len, max_step_yaw, total_yaw in candidates:
         spawned_actor = world.try_spawn_actor(vehicle_bp, sp)
         if spawned_actor is not None:
             vehicle = cast(Any, spawned_actor)
-            road_x, road_y, _ = CarlaControllerAdapter.convert_waypoints(route_wps)
+            road_x, road_y, road_yaw = CarlaControllerAdapter.convert_waypoints(
+                route_wps
+            )
+            _, road_curvature = compute_route_arc_length_and_curvature(
+                road_x, road_y, road_yaw
+            )
+            ds = np.hypot(np.diff(road_x), np.diff(road_y))
+            curved_mask = np.abs(road_curvature[:-1]) >= CURVATURE_THRESHOLD_1PM
+            curved_len = float(np.sum(ds[curved_mask]))
+            straight_len = float(np.sum(ds[~curved_mask]))
+            max_k = float(np.max(np.abs(road_curvature)))
+            min_r = float(1.0 / max_k) if max_k > 1e-6 else float("inf")
+
             first_wp = route_wps[0]
             details = RouteDetails(
                 spawn_point_index=sp_idx,
@@ -549,7 +647,11 @@ def select_spawn_point_and_route(
                 start_x_ctrl=float(road_x[0]),
                 start_y_ctrl=float(road_y[0]),
                 end_x_ctrl=float(road_x[-1]),
-                end_y_ctrl=float(road_y[-1])
+                end_y_ctrl=float(road_y[-1]),
+                straight_length_m=straight_len,
+                curved_length_m=curved_len,
+                max_abs_curvature_1pm=max_k,
+                min_turn_radius_m=min_r
             )
             return vehicle, route_wps, details
 
@@ -572,7 +674,9 @@ def compute_stanley_control_step(
     previous_applied_steering_rad: float,
     dt: float,
     step: int,
-    sim_time_s: float
+    sim_time_s: float,
+    road_s: NDArray[np.float64] | None = None,
+    road_curvature: NDArray[np.float64] | None = None
 ) -> TelemetrySample:
     """
     Execute one closed-loop Stanley + longitudinal control calculation using
@@ -580,6 +684,13 @@ def compute_stanley_control_step(
     """
     rear_x, rear_y, yaw_rad = adapter.get_rear_axle_pose()
     speed_mps = adapter.get_speed()
+
+    if road_s is None or road_curvature is None:
+        road_s, road_curvature = compute_route_arc_length_and_curvature(
+            road_x=road_x,
+            road_y=road_y,
+            road_yaw=road_yaw
+        )
 
     # Construct kinematic Vehicle using the live physics-derived wheelbase (3.0046 m)
     kinematic_vehicle = Vehicle(
@@ -637,11 +748,18 @@ def compute_stanley_control_step(
     # Convert controller steering radians (+left) to normalized CARLA steer (+right)
     normalized_carla_steer = adapter.to_carla_steer(applied_steering_rad)
 
-    # Compute longitudinal throttle and brake targeting 5.0 m/s
+    # Compute longitudinal throttle and brake
     throttle, brake = speed_controller.compute(
         current_speed_mps=speed_mps,
         dt=dt
     )
+
+    total_route_len_m = max(float(road_s[-1]), 1e-6)
+    route_progress_m = float(road_s[nearest_index])
+    route_progress_pct = float(
+        np.clip(100.0 * route_progress_m / total_route_len_m, 0.0, 100.0)
+    )
+    road_curvature_1pm = float(road_curvature[nearest_index])
 
     return TelemetrySample(
         step=int(step),
@@ -669,7 +787,10 @@ def compute_stanley_control_step(
         steering_rate_deg_s=float(math.degrees(steering_rate_rad_s)),
         normalized_carla_steer=float(normalized_carla_steer),
         throttle=float(throttle),
-        brake=float(brake)
+        brake=float(brake),
+        road_curvature_1pm=road_curvature_1pm,
+        route_progress_m=route_progress_m,
+        route_progress_pct=route_progress_pct
     )
 
 
@@ -797,18 +918,117 @@ def save_telemetry_to_csv(
     return csv_path
 
 
+def _compute_subset_metrics(
+    segment_name: str,
+    subset: Sequence[TelemetrySample],
+    segment_distance_m: float
+) -> SegmentPerformanceMetrics:
+    """Compute tracking and steering metrics over a non-empty sample subset."""
+    if not subset:
+        return SegmentPerformanceMetrics(
+            segment_name=segment_name,
+            sample_count=0,
+            distance_m=0.0,
+            mean_speed_mps=0.0,
+            max_speed_mps=0.0,
+            front_cte_rmse_m=0.0,
+            max_front_cte_m=0.0,
+            rear_axle_rmse_m=0.0,
+            max_rear_axle_error_m=0.0,
+            max_heading_error_deg=0.0,
+            steering_rms_deg=0.0,
+            max_applied_steering_deg=0.0,
+            max_steering_rate_deg_s=0.0,
+            steering_rate_rms_deg_s=0.0
+        )
+
+    speeds = np.array([s.speed_mps for s in subset], dtype=np.float64)
+    front_ctes = np.array([s.front_cross_track_error_m for s in subset], dtype=np.float64)
+    rear_errs = np.array([s.rear_axle_tracking_error_m for s in subset], dtype=np.float64)
+    head_deg = np.array([s.heading_error_deg for s in subset], dtype=np.float64)
+    app_steer_deg = np.array([s.applied_steering_deg for s in subset], dtype=np.float64)
+    steer_rate_deg_s = np.array([s.steering_rate_deg_s for s in subset], dtype=np.float64)
+
+    return SegmentPerformanceMetrics(
+        segment_name=segment_name,
+        sample_count=len(subset),
+        distance_m=float(segment_distance_m),
+        mean_speed_mps=float(np.mean(speeds)),
+        max_speed_mps=float(np.max(speeds)),
+        front_cte_rmse_m=float(np.sqrt(np.mean(front_ctes ** 2))),
+        max_front_cte_m=float(np.max(np.abs(front_ctes))),
+        rear_axle_rmse_m=float(np.sqrt(np.mean(rear_errs ** 2))),
+        max_rear_axle_error_m=float(np.max(np.abs(rear_errs))),
+        max_heading_error_deg=float(np.max(np.abs(head_deg))),
+        steering_rms_deg=float(np.sqrt(np.mean(app_steer_deg ** 2))),
+        max_applied_steering_deg=float(np.max(np.abs(app_steer_deg))),
+        max_steering_rate_deg_s=float(np.max(np.abs(steer_rate_deg_s))),
+        steering_rate_rms_deg_s=float(np.sqrt(np.mean(steer_rate_deg_s ** 2)))
+    )
+
+
+def calculate_segment_metrics(
+    samples: Sequence[TelemetrySample],
+    route_details: RouteDetails | None = None,
+    curvature_threshold_1pm: float = CURVATURE_THRESHOLD_1PM
+) -> dict[str, SegmentPerformanceMetrics]:
+    """
+    Separate performance metrics into:
+        - "straight": Straight-road segment (|road_curvature_1pm| < threshold)
+        - "curved": Curved-road segment (|road_curvature_1pm| >= threshold)
+        - "overall": Overall route (all samples)
+    """
+    if not samples:
+        raise ValueError("Cannot calculate segment metrics from empty samples.")
+
+    straight_samples = [
+        s for s in samples if abs(s.road_curvature_1pm) < curvature_threshold_1pm
+    ]
+    curved_samples = [
+        s for s in samples if abs(s.road_curvature_1pm) >= curvature_threshold_1pm
+    ]
+
+    if route_details is not None and route_details.total_length_m > 0.0:
+        overall_dist = route_details.total_length_m
+        straight_dist = route_details.straight_length_m
+        curved_dist = route_details.curved_length_m
+    else:
+        progress = np.array([s.route_progress_m for s in samples], dtype=np.float64)
+        ds = np.maximum(np.diff(progress, prepend=progress[0]), 0.0)
+        kappas = np.array([s.road_curvature_1pm for s in samples], dtype=np.float64)
+        curved_mask = np.abs(kappas) >= curvature_threshold_1pm
+        overall_dist = float(np.sum(ds))
+        straight_dist = float(np.sum(ds[~curved_mask]))
+        curved_dist = float(np.sum(ds[curved_mask]))
+
+    return {
+        "straight": _compute_subset_metrics(
+            "Straight-Road Segment", straight_samples, straight_dist
+        ),
+        "curved": _compute_subset_metrics(
+            "Curved-Road Segment", curved_samples, curved_dist
+        ),
+        "overall": _compute_subset_metrics(
+            "Overall Route", samples, overall_dist
+        ),
+    }
+
+
 def generate_stanley_carla_plots(
     samples: Sequence[TelemetrySample],
     road_x: NDArray[np.float64],
     road_y: NDArray[np.float64],
-    output_dir: Path = RESULTS_DIR
+    output_dir: Path = RESULTS_DIR,
+    target_speed_mps: float = TARGET_SPEED_MPS,
+    file_prefix: str = DEFAULT_FILE_PREFIX
 ) -> dict[str, Path]:
     """
-    Generate and save the 4 required closed-loop Stanley CARLA evaluation plots:
+    Generate and save the closed-loop Stanley CARLA evaluation plots:
         1. Vehicle trajectory plot
-        2. Cross-track error plot
-        3. Steering angle plot
-        4. Speed vs time plot
+        2. Cross-track error plot (vs. time and vs. route distance)
+        3. Dedicated tracking error & curvature vs. route distance plot
+        4. Steering angle plot
+        5. Speed vs time plot
     """
     if not samples:
         raise ValueError("Cannot generate plots from empty telemetry samples.")
@@ -816,24 +1036,37 @@ def generate_stanley_carla_plots(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     time_s = np.array([s.sim_time_s for s in samples], dtype=np.float64)
+    progress_m = np.array([s.route_progress_m for s in samples], dtype=np.float64)
+    curvature_1pm = np.array([s.road_curvature_1pm for s in samples], dtype=np.float64)
     rear_x = np.array([s.rear_x_m for s in samples], dtype=np.float64)
     rear_y = np.array([s.rear_y_m for s in samples], dtype=np.float64)
     front_x = np.array([s.front_x_m for s in samples], dtype=np.float64)
     front_y = np.array([s.front_y_m for s in samples], dtype=np.float64)
     rear_err = np.array([s.rear_axle_tracking_error_m for s in samples], dtype=np.float64)
     front_cte = np.array([s.front_cross_track_error_m for s in samples], dtype=np.float64)
+    heading_deg = np.array([s.heading_error_deg for s in samples], dtype=np.float64)
     req_steer_deg = np.array([s.requested_steering_deg for s in samples], dtype=np.float64)
     app_steer_deg = np.array([s.applied_steering_deg for s in samples], dtype=np.float64)
     carla_steer = np.array([s.normalized_carla_steer for s in samples], dtype=np.float64)
     speed_mps = np.array([s.speed_mps for s in samples], dtype=np.float64)
 
-    trajectory_path = output_dir / "stanley_carla_trajectory.png"
-    cte_path = output_dir / "stanley_carla_cross_track_error.png"
-    steering_path = output_dir / "stanley_carla_steering_angle.png"
-    speed_path = output_dir / "stanley_carla_speed.png"
+    trajectory_path = output_dir / f"{file_prefix}_trajectory.png"
+    cte_path = output_dir / f"{file_prefix}_cross_track_error.png"
+    error_dist_path = output_dir / f"{file_prefix}_error_vs_distance.png"
+    steering_path = output_dir / f"{file_prefix}_steering_angle.png"
+    speed_path = output_dir / f"{file_prefix}_speed.png"
+
+    curved_mask = np.abs(curvature_1pm) >= CURVATURE_THRESHOLD_1PM
+    has_curved = bool(np.any(curved_mask))
+    if has_curved:
+        curve_start_m = float(progress_m[curved_mask][0])
+        curve_end_m = float(progress_m[curved_mask][-1])
+    else:
+        curve_start_m = 0.0
+        curve_end_m = 0.0
 
     # 1. Vehicle Trajectory Plot
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(
         road_x,
         road_y,
@@ -861,22 +1094,23 @@ def generate_stanley_carla_plots(
     ax.set_title("CARLA 0.9.16 Closed-Loop Stanley Trajectory (Tesla Model 3, Town10HD_Opt)")
     ax.set_xlabel("Controller X (m)")
     ax.set_ylabel("Controller Y (m, +Left)")
+    ax.set_aspect("equal", adjustable="datalim")
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="best")
     fig.tight_layout()
     fig.savefig(trajectory_path, dpi=150)
     plt.close(fig)
 
-    # 2. Cross-Track Error Plot
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(
+    # 2. Cross-Track Error Plot (vs. Time and vs. Route Distance)
+    fig, (ax_t, ax_s) = plt.subplots(2, 1, figsize=(10, 7.5))
+    ax_t.plot(
         time_s,
         front_cte,
         color="tab:blue",
         linewidth=2.0,
         label="Front-Axle Cross-Track Error (m)"
     )
-    ax.plot(
+    ax_t.plot(
         time_s,
         rear_err,
         color="tab:orange",
@@ -884,17 +1118,114 @@ def generate_stanley_carla_plots(
         linewidth=1.8,
         label="Rear-Axle Tracking Error (m)"
     )
-    ax.axhline(0.0, color="black", linestyle=":", linewidth=1.0)
-    ax.set_title("CARLA 0.9.16 Stanley Path-Tracking Cross-Track Error vs. Time")
-    ax.set_xlabel("Simulation Time (s)")
-    ax.set_ylabel("Tracking Error (m)")
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best")
+    ax_t.axhline(0.0, color="black", linestyle=":", linewidth=1.0)
+    ax_t.set_title("CARLA 0.9.16 Stanley Path-Tracking Error vs. Time and Route Distance")
+    ax_t.set_xlabel("Simulation Time (s)")
+    ax_t.set_ylabel("Tracking Error (m)")
+    ax_t.grid(True, linestyle="--", alpha=0.5)
+    ax_t.legend(loc="best")
+
+    if has_curved:
+        ax_s.axvspan(
+            curve_start_m,
+            curve_end_m,
+            color="gold",
+            alpha=0.22,
+            label=f"Sustained Curved Segment ({curve_start_m:.1f}-{curve_end_m:.1f} m)"
+        )
+    ax_s.plot(
+        progress_m,
+        front_cte,
+        color="tab:blue",
+        linewidth=2.0,
+        label="Front-Axle Cross-Track Error (m)"
+    )
+    ax_s.plot(
+        progress_m,
+        rear_err,
+        color="tab:orange",
+        linestyle="--",
+        linewidth=1.8,
+        label="Rear-Axle Tracking Error (m)"
+    )
+    ax_s.axhline(0.0, color="black", linestyle=":", linewidth=1.0)
+    ax_s.set_xlabel("Route Distance / Progress s (m)")
+    ax_s.set_ylabel("Tracking Error (m)")
+    ax_s.grid(True, linestyle="--", alpha=0.5)
+    ax_s.legend(loc="best")
     fig.tight_layout()
     fig.savefig(cte_path, dpi=150)
     plt.close(fig)
 
-    # 3. Steering Angle Plot
+    # 3. Dedicated Tracking Error, Heading/Steering, and Road Curvature vs. Route Distance Plot
+    fig, (ax_err, ax_ang, ax_kap) = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
+    if has_curved:
+        for ax_sub in (ax_err, ax_ang, ax_kap):
+            ax_sub.axvspan(
+                curve_start_m,
+                curve_end_m,
+                color="gold",
+                alpha=0.22,
+                label="Curved-Road Segment" if ax_sub is ax_err else None
+            )
+    ax_err.plot(
+        progress_m,
+        front_cte,
+        color="tab:blue",
+        linewidth=2.0,
+        label="Front-Axle Cross-Track Error (m)"
+    )
+    ax_err.plot(
+        progress_m,
+        rear_err,
+        color="tab:orange",
+        linestyle="--",
+        linewidth=1.8,
+        label="Rear-Axle Tracking Error (m)"
+    )
+    ax_err.axhline(0.0, color="black", linestyle=":", linewidth=1.0)
+    ax_err.set_title("CARLA 0.9.16 Stanley Tracking Performance vs. Route Distance (v = 8.0 m/s)")
+    ax_err.set_ylabel("Tracking Error (m)")
+    ax_err.grid(True, linestyle="--", alpha=0.5)
+    ax_err.legend(loc="best")
+
+    ax_ang.plot(
+        progress_m,
+        heading_deg,
+        color="tab:purple",
+        linewidth=1.8,
+        label="Heading Error (deg)"
+    )
+    ax_ang.plot(
+        progress_m,
+        app_steer_deg,
+        color="tab:blue",
+        linestyle="--",
+        linewidth=2.0,
+        label="Applied Steering Angle (deg, +Left)"
+    )
+    ax_ang.axhline(0.0, color="black", linestyle=":", linewidth=1.0)
+    ax_ang.set_ylabel("Angle (deg)")
+    ax_ang.grid(True, linestyle="--", alpha=0.5)
+    ax_ang.legend(loc="best")
+
+    ax_kap.plot(
+        progress_m,
+        curvature_1pm,
+        color="tab:red",
+        linewidth=2.0,
+        label="Road Curvature kappa(s) (m^-1)"
+    )
+    ax_kap.axhline(0.0, color="black", linestyle=":", linewidth=1.0)
+    ax_kap.set_xlabel("Route Distance s (m)")
+    ax_kap.set_ylabel("Curvature (m^-1)")
+    ax_kap.grid(True, linestyle="--", alpha=0.5)
+    ax_kap.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(error_dist_path, dpi=150)
+    plt.close(fig)
+
+    # 4. Steering Angle Plot
     fig, ax1 = plt.subplots(figsize=(10, 5))
     ax1.plot(
         time_s,
@@ -930,7 +1261,7 @@ def generate_stanley_carla_plots(
     fig.savefig(steering_path, dpi=150)
     plt.close(fig)
 
-    # 4. Speed vs. Time Plot
+    # 5. Speed vs. Time Plot
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(
         time_s,
@@ -940,11 +1271,11 @@ def generate_stanley_carla_plots(
         label="Measured Vehicle Speed (m/s)"
     )
     ax.axhline(
-        TARGET_SPEED_MPS,
+        target_speed_mps,
         color="black",
         linestyle="--",
         linewidth=1.5,
-        label=f"Target Speed ({TARGET_SPEED_MPS:.1f} m/s)"
+        label=f"Target Speed ({target_speed_mps:.1f} m/s)"
     )
     ax.set_title("CARLA 0.9.16 Longitudinal Speed Tracking vs. Time")
     ax.set_xlabel("Simulation Time (s)")
@@ -992,6 +1323,10 @@ def summarize_test_run(
     rate_violations = int(np.sum(np.abs(steer_rate_rad_s) > MAX_STEERING_RATE_RAD_S + 1e-9))
     non_finite_count = sum(0 if is_sample_finite(s) else 1 for s in samples)
 
+    segment_metrics = calculate_segment_metrics(
+        samples=samples,
+        route_details=route_details
+    )
     geom = adapter.geometry
 
     return StanleyCarlaTestSummary(
@@ -1024,7 +1359,9 @@ def summarize_test_run(
         rate_constraint_violations=rate_violations,
         non_finite_values=int(non_finite_count),
         csv_path=csv_path,
-        plot_paths=plot_paths
+        plot_paths=plot_paths,
+        steering_rms_deg=float(np.sqrt(np.mean(app_steer_deg ** 2))),
+        segment_metrics=segment_metrics
     )
 
 
@@ -1041,7 +1378,8 @@ def run_stanley_carla_test(
     route_distance_m: float = ROUTE_DISTANCE_M,
     waypoint_spacing_m: float = WAYPOINT_SPACING_M,
     max_simulation_duration_s: float = MAX_SIMULATION_DURATION_S,
-    results_dir: Path = RESULTS_DIR
+    results_dir: Path = RESULTS_DIR,
+    file_prefix: str = DEFAULT_FILE_PREFIX
 ) -> StanleyCarlaTestSummary:
     """
     Connect to CARLA 0.9.16, configure synchronous mode, spawn a Tesla Model 3
@@ -1107,6 +1445,11 @@ def run_stanley_carla_test(
         # 5. Retrieve vehicle physics and initialize CarlaControllerAdapter
         adapter = CarlaControllerAdapter(vehicle)
         road_x, road_y, road_yaw = adapter.convert_waypoints(waypoints)
+        road_s, road_curvature = compute_route_arc_length_and_curvature(
+            road_x=road_x,
+            road_y=road_y,
+            road_yaw=road_yaw
+        )
         draw_route_markers(world, waypoints)
 
         # 6. Initialize StanleyController using its actual constructor signature
@@ -1124,15 +1467,21 @@ def run_stanley_carla_test(
         termination_reason: str = "max_duration_reached"
         route_completed: bool = False
 
-        print("=" * 90)
+        print("=" * 95)
         print("CARLA 0.9.16 CLOSED-LOOP STANLEY LANE-KEEPING TEST")
-        print("=" * 90)
+        print("=" * 95)
         print(f"Map                      : {world.get_map().name}")
         print(f"Vehicle Blueprint        : {vehicle.type_id} (ID: {vehicle.id})")
         print(
             f"Route                    : SpawnPoint #{route_details.spawn_point_index} | "
             f"Road {route_details.road_id}, Lane {route_details.lane_id} | "
-            f"{route_details.num_waypoints} wps ({route_details.total_length_m:.1f} m)"
+            f"{route_details.num_waypoints} wps ({route_details.total_length_m:.2f} m)"
+        )
+        print(
+            f"Route Geometry           : Straight = {route_details.straight_length_m:.2f} m | "
+            f"Curved = {route_details.curved_length_m:.2f} m | "
+            f"Max |kappa| = {route_details.max_abs_curvature_1pm:.5f} m^-1 "
+            f"(R_min = {route_details.min_turn_radius_m:.2f} m)"
         )
         print(
             f"Live Physics Geometry    : Wheelbase = {adapter.wheelbase:.4f} m | "
@@ -1145,7 +1494,7 @@ def run_stanley_carla_test(
             f"Max Steer = +/-{MAX_STEERING_DEG:.0f} deg | "
             f"Max Rate = +/-{MAX_STEERING_RATE_DEG_S:.0f} deg/s"
         )
-        print("-" * 90)
+        print("-" * 95)
 
         for step in range(max_steps + 1):
             sim_time_s = step * fixed_delta_seconds
@@ -1160,7 +1509,9 @@ def run_stanley_carla_test(
                 previous_applied_steering_rad=applied_steering_rad,
                 dt=fixed_delta_seconds,
                 step=step,
-                sim_time_s=sim_time_s
+                sim_time_s=sim_time_s,
+                road_s=road_s,
+                road_curvature=road_curvature
             )
             samples.append(sample)
             applied_steering_rad = sample.applied_steering_rad
@@ -1177,15 +1528,13 @@ def run_stanley_carla_test(
 
             if step % 20 == 0 or should_stop:
                 print(
-                    f"[t={sample.sim_time_s:5.2f}s | step={sample.step:03d}] "
-                    f"v={sample.speed_mps:4.2f} m/s | "
-                    f"rear_err={sample.rear_axle_tracking_error_m:+.4f} m | "
-                    f"front_cte={sample.front_cross_track_error_m:+.4f} m | "
-                    f"head_err={sample.heading_error_deg:+.2f} deg | "
-                    f"req_steer={sample.requested_steering_deg:+.2f} deg | "
-                    f"app_steer={sample.applied_steering_deg:+.2f} deg | "
-                    f"carla_steer={sample.normalized_carla_steer:+.4f} | "
-                    f"thr={sample.throttle:.2f} | brk={sample.brake:.2f}"
+                    f"[t={sample.sim_time_s:5.2f}s | s={sample.route_progress_m:6.2f}m ({sample.route_progress_pct:5.1f}%)] "
+                    f"v={sample.speed_mps:4.2f}m/s | "
+                    f"kappa={sample.road_curvature_1pm:+.4f}m^-1 | "
+                    f"front_cte={sample.front_cross_track_error_m:+.4f}m | "
+                    f"rear_err={sample.rear_axle_tracking_error_m:+.4f}m | "
+                    f"head_err={sample.heading_error_deg:+.2f}deg | "
+                    f"steer={sample.applied_steering_deg:+.2f}deg"
                 )
 
             if should_stop:
@@ -1220,13 +1569,15 @@ def run_stanley_carla_test(
 
         csv_path = save_telemetry_to_csv(
             samples=samples,
-            csv_path=results_dir / "stanley_carla_telemetry.csv"
+            csv_path=results_dir / f"{file_prefix}_telemetry.csv"
         )
         plot_paths = generate_stanley_carla_plots(
             samples=samples,
             road_x=road_x,
             road_y=road_y,
-            output_dir=results_dir
+            output_dir=results_dir,
+            target_speed_mps=target_speed_mps,
+            file_prefix=file_prefix
         )
 
         summary = summarize_test_run(
@@ -1240,23 +1591,41 @@ def run_stanley_carla_test(
             plot_paths=plot_paths
         )
 
-        print("-" * 90)
+        print("-" * 95)
         print(f"Termination Reason       : {summary.termination_reason}")
         print(f"Route Completed          : {summary.route_completed}")
         print(f"Collision Count          : {summary.collision_count}")
-        print(f"Max Speed                : {summary.max_speed_mps:.4f} m/s")
+        print(f"Simulation Duration      : {summary.simulation_duration_s:.2f} s ({summary.total_steps} steps)")
+        print(f"Max / Mean Speed         : {summary.max_speed_mps:.4f} m/s / {summary.mean_speed_mps:.4f} m/s")
         print(f"Rear-Axle Tracking RMSE  : {summary.rear_axle_rmse_m:.4f} m (Max: {summary.max_rear_axle_error_m:.4f} m)")
         print(f"Front-Axle CTE RMSE      : {summary.front_cte_rmse_m:.4f} m (Max: {summary.max_front_cte_m:.4f} m)")
         print(
-            f"Max Applied Steering     : {summary.max_applied_steering_deg:.4f} deg "
+            f"Steering RMS / Max       : {summary.steering_rms_deg:.4f} deg / {summary.max_applied_steering_deg:.4f} deg "
             f"(Max Rate: {summary.max_steering_rate_deg_s:.4f} deg/s)"
         )
         print(
             f"Constraint Violations    : Angle={summary.angle_constraint_violations}, "
             f"Rate={summary.rate_constraint_violations}, NonFinite={summary.non_finite_values}"
         )
+        if summary.segment_metrics is not None:
+            print("-" * 95)
+            print(
+                f"{'Segment':<24} | {'Samples':>7} | {'Dist (m)':>8} | "
+                f"{'Front RMSE':>10} | {'Max |CTE|':>10} | {'Rear RMSE':>10} | "
+                f"{'Steer RMS':>10} | {'Max Rate':>10}"
+            )
+            print("-" * 95)
+            for seg_key in ("straight", "curved", "overall"):
+                sm = summary.segment_metrics[seg_key]
+                print(
+                    f"{sm.segment_name:<24} | {sm.sample_count:7d} | {sm.distance_m:8.2f} | "
+                    f"{sm.front_cte_rmse_m:10.4f} | {sm.max_front_cte_m:10.4f} | "
+                    f"{sm.rear_axle_rmse_m:10.4f} | {sm.steering_rms_deg:10.4f} | "
+                    f"{sm.max_steering_rate_deg_s:10.4f}"
+                )
+        print("-" * 95)
         print(f"Telemetry CSV Saved      : {summary.csv_path}")
-        print("=" * 90)
+        print("=" * 95)
 
         return summary
 

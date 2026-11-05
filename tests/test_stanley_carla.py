@@ -19,9 +19,7 @@ from carla_integration.carla_adapter import CarlaControllerAdapter
 from carla_integration.stanley_carla import (
     ConservativeLongitudinalController,
     FIXED_DELTA_SECONDS,
-    MAX_STEERING_DEG,
     MAX_STEERING_RAD,
-    MAX_STEERING_RATE_DEG_S,
     MAX_STEERING_RATE_RAD_S,
     RouteDetails,
     TARGET_SPEED_MPS,
@@ -255,17 +253,20 @@ def test_steering_angle_and_rate_constraints() -> None:
 def test_conservative_longitudinal_controller() -> None:
     """
     Verify longitudinal speed controller commands bounded throttle below
-    5.0 m/s and bounded brake above 5.0 m/s without simultaneous actuation.
+    target speed and bounded brake above target speed without simultaneous actuation.
     """
     lon_ctrl = ConservativeLongitudinalController(target_speed_mps=TARGET_SPEED_MPS)
 
-    # Below target speed (0.0 m/s -> 5.0 m/s)
+    # Below target speed
     throttle_low, brake_low = lon_ctrl.compute(current_speed_mps=0.0, dt=0.05)
     assert 0.0 < throttle_low <= lon_ctrl.max_throttle
     assert brake_low == 0.0
 
-    # Above target speed (6.0 m/s -> 5.0 m/s)
-    throttle_high, brake_high = lon_ctrl.compute(current_speed_mps=6.0, dt=0.05)
+    # Above target speed
+    throttle_high, brake_high = lon_ctrl.compute(
+        current_speed_mps=TARGET_SPEED_MPS + 1.0,
+        dt=0.05
+    )
     assert throttle_high == 0.0
     assert 0.0 < brake_high <= lon_ctrl.max_brake
 
