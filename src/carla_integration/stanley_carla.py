@@ -530,18 +530,31 @@ def select_spawn_point_and_route(
     spacing_m: float = WAYPOINT_SPACING_M,
     max_step_yaw_deg: float = MAX_STEP_YAW_CHANGE_DEG,
     max_total_yaw_deg: float = MAX_TOTAL_ROUTE_YAW_DEG,
-    preferred_spawn_point_index: int = PREFERRED_SPAWN_POINT_INDEX
+    preferred_spawn_point_index: int = PREFERRED_SPAWN_POINT_INDEX,
+    initial_lateral_offset_m: float = 0.0
 ) -> tuple[Any, list[Any], RouteDetails]:
     """
     Search map spawn points for a clean, continuous single-lane driving route
     free of intersections and sharp discontinuities, and spawn the Tesla Model 3.
+
+    Positive initial_lateral_offset_m means LEFT in controller coordinates.
     """
+
+    if not math.isfinite(initial_lateral_offset_m):
+        raise ValueError("Initial lateral offset must be finite.")
+
     carla_map = world.get_map()
     spawn_points = carla_map.get_spawn_points()
-    if not spawn_points:
-        raise RuntimeError("No spawn points available in the active CARLA map.")
 
-    is_extended_route = route_distance_m >= MIN_EXTENDED_ROUTE_LENGTH_M
+    if not spawn_points:
+        raise RuntimeError(
+            "No spawn points available in the active CARLA map."
+        )
+
+    is_extended_route = (
+        route_distance_m >= MIN_EXTENDED_ROUTE_LENGTH_M
+    )
+
     min_required_length_m = (
         MIN_EXTENDED_ROUTE_LENGTH_M
         if is_extended_route
@@ -551,6 +564,7 @@ def select_spawn_point_and_route(
     candidates: list[
         tuple[int, float, float, int, Any, list[Any], float, float, float]
     ] = []
+
     driving_lane_type = (
         carla.LaneType.Driving
         if carla is not None and hasattr(carla, "LaneType")
@@ -558,6 +572,7 @@ def select_spawn_point_and_route(
     )
 
     for sp_idx, sp in enumerate(spawn_points):
+
         if driving_lane_type is not None:
             start_wp = carla_map.get_waypoint(
                 sp.location,
@@ -569,7 +584,10 @@ def select_spawn_point_and_route(
                 sp.location,
                 project_to_road=True
             )
-        if start_wp is None or bool(getattr(start_wp, "is_junction", False)):
+
+        if start_wp is None or bool(
+            getattr(start_wp, "is_junction", False)
+        ):
             continue
 
         try:
@@ -580,25 +598,44 @@ def select_spawn_point_and_route(
                 max_step_yaw_deg=max_step_yaw_deg,
                 allow_contiguous_road_id=is_extended_route
             )
+
         except ValueError:
             continue
 
-        total_len, max_step_yaw, total_yaw = verify_route_continuity(
-            waypoints=route_wps,
-            expected_spacing_m=spacing_m,
-            max_step_yaw_deg=max_step_yaw_deg,
-            allow_contiguous_road_id=is_extended_route
+        total_len, max_step_yaw, total_yaw = (
+            verify_route_continuity(
+                waypoints=route_wps,
+                expected_spacing_m=spacing_m,
+                max_step_yaw_deg=max_step_yaw_deg,
+                allow_contiguous_road_id=is_extended_route
+            )
         )
-        if total_len < min_required_length_m or total_yaw > max_total_yaw_deg:
+
+        if (
+            total_len < min_required_length_m
+            or total_yaw > max_total_yaw_deg
+        ):
             continue
-        if is_extended_route and len(spawn_points) > 1 and total_yaw < 45.0:
+
+        if (
+            is_extended_route
+            and len(spawn_points) > 1
+            and total_yaw < 45.0
+        ):
             continue
 
         sp_offset = math.hypot(
-            float(sp.location.x) - float(start_wp.transform.location.x),
-            float(sp.location.y) - float(start_wp.transform.location.y)
+            float(sp.location.x)
+            - float(start_wp.transform.location.x),
+
+            float(sp.location.y)
+            - float(start_wp.transform.location.y)
         )
-        pref_rank = 0 if sp_idx == preferred_spawn_point_index else 1
+
+        pref_rank = (
+            0 if sp_idx == preferred_spawn_point_index else 1
+        )
+
         candidates.append(
             (
                 pref_rank,
@@ -614,35 +651,131 @@ def select_spawn_point_and_route(
         )
 
     candidates.sort(
-        key=lambda item: (item[0], round(item[1], 4), round(item[2], 3), item[3])
+        key=lambda item: (
+            item[0],
+            round(item[1], 4),
+            round(item[2], 3),
+            item[3]
+        )
     )
 
-    for _, _, _, sp_idx, sp, route_wps, total_len, max_step_yaw, total_yaw in candidates:
-        spawned_actor = world.try_spawn_actor(vehicle_bp, sp)
-        if spawned_actor is not None:
-            vehicle = cast(Any, spawned_actor)
-            road_x, road_y, road_yaw = CarlaControllerAdapter.convert_waypoints(
-                route_wps
+    for (
+        _,
+        _,
+        _,
+        sp_idx,
+        sp,
+        route_wps,
+        total_len,
+        max_step_yaw,
+        total_yaw
+    ) in candidates:
+
+        # Preserve the original spawn transform for zero offset.
+        spawn_transform = sp
+
+        if initial_lateral_offset_m != 0.0:
+
+            if carla is None:
+                raise RuntimeError(
+                    "CARLA Python API is unavailable."
+                )
+
+            yaw_rad = math.radians(
+                float(sp.rotation.yaw)
             )
-            _, road_curvature = compute_route_arc_length_and_curvature(
-                road_x, road_y, road_yaw
+
+            # CARLA coordinates use positive Y to the right.
+            # Positive controller offset means LEFT.
+
+            offset_x = (
+                initial_lateral_offset_m
+                * math.sin(yaw_rad)
             )
-            ds = np.hypot(np.diff(road_x), np.diff(road_y))
-            curved_mask = np.abs(road_curvature[:-1]) >= CURVATURE_THRESHOLD_1PM
-            curved_len = float(np.sum(ds[curved_mask]))
-            straight_len = float(np.sum(ds[~curved_mask]))
-            max_k = float(np.max(np.abs(road_curvature)))
-            min_r = float(1.0 / max_k) if max_k > 1e-6 else float("inf")
+
+            offset_y = (
+                -initial_lateral_offset_m
+                * math.cos(yaw_rad)
+            )
+
+            spawn_transform = carla.Transform(
+                carla.Location(
+                    x=float(sp.location.x) + offset_x,
+                    y=float(sp.location.y) + offset_y,
+                    z=float(sp.location.z)
+                ),
+                sp.rotation
+            )
+
+        spawned_actor = world.try_spawn_actor(
+            vehicle_bp,
+            spawn_transform
+        )
+
+        if spawned_actor is None:
+            continue
+
+        vehicle = cast(Any, spawned_actor)
+
+        try:
+            road_x, road_y, road_yaw = (
+                CarlaControllerAdapter.convert_waypoints(
+                    route_wps
+                )
+            )
+
+            _, road_curvature = (
+                compute_route_arc_length_and_curvature(
+                    road_x,
+                    road_y,
+                    road_yaw
+                )
+            )
+
+            ds = np.hypot(
+                np.diff(road_x),
+                np.diff(road_y)
+            )
+
+            curved_mask = (
+                np.abs(road_curvature[:-1])
+                >= CURVATURE_THRESHOLD_1PM
+            )
+
+            curved_len = float(
+                np.sum(ds[curved_mask])
+            )
+
+            straight_len = float(
+                np.sum(ds[~curved_mask])
+            )
+
+            max_k = float(
+                np.max(np.abs(road_curvature))
+            )
+
+            min_r = (
+                float(1.0 / max_k)
+                if max_k > 1e-6
+                else float("inf")
+            )
 
             first_wp = route_wps[0]
+
             details = RouteDetails(
                 spawn_point_index=sp_idx,
-                road_id=int(getattr(first_wp, "road_id", 0)),
-                lane_id=int(getattr(first_wp, "lane_id", 0)),
+                road_id=int(
+                    getattr(first_wp, "road_id", 0)
+                ),
+                lane_id=int(
+                    getattr(first_wp, "lane_id", 0)
+                ),
                 num_waypoints=len(route_wps),
                 waypoint_spacing_m=float(spacing_m),
                 total_length_m=float(total_len),
-                max_step_yaw_change_deg=float(max_step_yaw),
+                max_step_yaw_change_deg=float(
+                    max_step_yaw
+                ),
                 total_yaw_change_deg=float(total_yaw),
                 start_x_ctrl=float(road_x[0]),
                 start_y_ctrl=float(road_y[0]),
@@ -653,10 +786,25 @@ def select_spawn_point_and_route(
                 max_abs_curvature_1pm=max_k,
                 min_turn_radius_m=min_r
             )
+
             return vehicle, route_wps, details
 
+        except Exception:
+
+            # Destroy the spawned vehicle if metadata
+            # construction fails.
+
+            try:
+                if vehicle.is_alive:
+                    vehicle.destroy()
+            except Exception:
+                pass
+
+            raise
+
     raise RuntimeError(
-        "Unable to find and spawn Tesla Model 3 on a continuous driving-lane route."
+        "Unable to find and spawn Tesla Model 3 "
+        "on a continuous driving-lane route."
     )
 
 
@@ -1379,7 +1527,8 @@ def run_stanley_carla_test(
     waypoint_spacing_m: float = WAYPOINT_SPACING_M,
     max_simulation_duration_s: float = MAX_SIMULATION_DURATION_S,
     results_dir: Path = RESULTS_DIR,
-    file_prefix: str = DEFAULT_FILE_PREFIX
+    file_prefix: str = DEFAULT_FILE_PREFIX,
+    initial_lateral_offset_m: float = 0.0
 ) -> StanleyCarlaTestSummary:
     """
     Connect to CARLA 0.9.16, configure synchronous mode, spawn a Tesla Model 3
@@ -1416,7 +1565,8 @@ def run_stanley_carla_test(
             world=world,
             vehicle_bp=vehicle_bp,
             route_distance_m=route_distance_m,
-            spacing_m=waypoint_spacing_m
+            spacing_m=waypoint_spacing_m,
+            initial_lateral_offset_m=initial_lateral_offset_m
         )
 
         # 3. Disable autopilot and settle vehicle on road surface
@@ -1450,6 +1600,35 @@ def run_stanley_carla_test(
             road_y=road_y,
             road_yaw=road_yaw
         )
+
+        # ==================================================
+        # VERIFY INITIAL LATERAL OFFSET
+        # ==================================================
+        
+        rear_x, rear_y, yaw = adapter.get_rear_axle_pose()
+
+        initial_error = (
+            -(rear_x - road_x[0]) * math.sin(road_yaw[0])
+            + (rear_y - road_y[0]) * math.cos(road_yaw[0])
+            )
+        
+        print(
+            f"Requested initial offset : "
+            f"{initial_lateral_offset_m:+.4f} m"
+        )
+
+        print(
+            f"Measured initial offset  : "
+            f"{initial_error:+.4f} m"
+        )
+        if abs(initial_error - initial_lateral_offset_m) > 0.15:
+            raise RuntimeError(
+                "Initial lateral offset verification failed. "
+                "Requested={initial_lateral_offset_m:+.4f} m, "
+                f"Measured={initial_error:+.4f} m"
+        )
+
+
         draw_route_markers(world, waypoints)
 
         # 6. Initialize StanleyController using its actual constructor signature
