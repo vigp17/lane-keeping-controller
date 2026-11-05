@@ -1,307 +1,262 @@
-# Autonomous Vehicle Lane-Keeping Controller
+# Autonomous Vehicle Lane-Keeping: Controller Design and CARLA Validation
 
-A modular Python simulation and control benchmark for autonomous vehicle lateral path tracking using a kinematic bicycle model, realistic actuator constraints, and automated verification.
+**Python · CARLA 0.9.16 · Stanley · Pure Pursuit · LQR · MPC · pytest**
 
----
+A modular lateral path-tracking project that progresses from a kinematic bicycle model to closed-loop controller evaluation in CARLA. Five controller configurations were tested on the same 135.24 m route with steering-angle and steering-rate constraints.
 
-## Implemented Phases
+> **Scope:** Simulation-based lateral control research and validation, not a production autonomous-driving or safety-certified system. Reported measurements are from the project's executed simulations and GitHub Copilot summaries; the benchmark has not yet been independently audited from raw telemetry in this README.
 
-1. **Phase 1–2**: Kinematic bicycle vehicle model and open-loop trajectory simulation (`src/vehicle.py`, `src/simulation.py`)
-2. **Phase 3–4**: Baseline lateral PID + heading feedback controller with steering angle and steering rate constraints (`src/controllers/pid_controller.py`, `src/closed_loop_simulation.py`)
-3. **Phase 5**: Discrete-time Linear Quadratic Regulator (`src/controllers/lqr_controller.py`, `src/lqr_simulation.py`)
-4. **Phase 6**: Augmented state-space LQR with steering-rate control input and controller comparison framework (`src/controllers/augmented_lqr_controller.py`, `src/compare_controllers.py`)
-5. **Phase 7**: Sinusoidal curved-road reference generation with analytical heading and curvature profiles (`src/road.py`, `src/curved_road_simulation.py`)
-6. **Phase 8**: Stanley geometric path-tracking controller for straight and curved roads (`src/controllers/stanley_controller.py`, `src/stanley_simulation.py`)
-7. **Phase 9**: Pure Pursuit lookahead geometric path-tracking controller with cumulative arc-length target selection (`src/controllers/pure_pursuit_controller.py`, `src/pure_pursuit_simulation.py`)
-8. **Phase 10**: Constrained Linear-Quadratic Model Predictive Controller (MPC) with road curvature preview and hard actuator bounds (`src/controllers/mpc_controller.py`, `src/mpc_simulation.py`)
+## At a glance
 
----
+- **Five CARLA-tested controllers:** baseline proportional lateral + heading feedback with curvature feedforward, Stanley, Pure Pursuit, augmented LQR, and constrained MPC.
+- **CARLA vehicle:** Tesla Model 3, Town10HD_Opt; physics-derived wheelbase approximately **3.0046 m**.
+- **Common test:** 135.24 m route, **8 m/s target speed**, **0.05 s** synchronous timestep, steering angle **±30°**, steering rate **±20°/s**.
+- **Reported outcome:** all five completed the route, with **zero detected collisions** and **zero reported steering-constraint violations**.
+- **Automated tests:** **257 passed** in the most recent reported full suite.
 
-## Coordinate and Sign Conventions
+![Five-controller benchmark summary](results/final_controller_comparison.png)
 
-- **Global $X$ axis**: Points forward along the initial road direction.
-- **Global $Y$ axis**: Points left.
-- **Yaw angle ($\psi$)**: Measured counterclockwise from the global $X$ axis in radians.
-- **Steering angle ($\delta$)**: Positive steering angle produces positive (counterclockwise) yaw rate.
-- **Vehicle reference point $(x, y)$**: Rear-axle center, with wheelbase $L = 2.8\text{ m}$.
+## CARLA benchmark results
 
----
+**Scenario:** `Town10HD_Opt`, Tesla Model 3, spawn point 61, continuous lane across roads 10 → 0 → 3. The 135.24 m route comprises a 57.50 m straight approach, a 60.22 m approximately 90° right-hand curve (radius approximately 37.66 m), and a 17.51 m straight exit. Target speed is 8 m/s; initial conditions, longitudinal controller, steering constraints, and route are intended to be shared across runs.
 
-## Phase 8: Stanley Geometric Path-Tracking Controller
+| Controller | Rear-axle RMSE (m) ↓ | Front-axle CTE RMSE (m) ↓ | Steering RMS (°) ↓ | Steering-rate RMS (°/s) ↓ | Completed | Collisions |
+|---|---:|---:|---:|---:|:---:|---:|
+| Stanley | **0.0488** | **0.0915** | 3.3415 | 4.4192 | Yes | 0 |
+| Constrained MPC | 0.0664 | 0.1116 | 3.4207 | 2.6930 | Yes | 0 |
+| Pure Pursuit | 0.1460 | 0.1871 | **3.3156** | **1.5476** | Yes | 0 |
+| Augmented LQR | 0.1873 | 0.2315 | 3.3987 | 2.4933 | Yes | 0 |
+| Baseline feedback + feedforward | 0.2847 | 0.3276 | 3.4049 | 2.8547 | Yes | 0 |
 
-### Overview
+**Interpretation:** Stanley had the lowest reported tracking error in this scenario; Pure Pursuit had the lowest steering-rate RMS; MPC provided the second-lowest tracking error with a smoother steering-rate profile than Stanley. These are **scenario-specific findings**, not universal controller rankings. Baseline and augmented LQR gains were not comprehensively retuned for CARLA. The baseline is proportional lateral feedback with heading feedback (its integral and derivative gains are zero), not a fully tuned three-term PID.
 
-The Stanley controller (`src/controllers/stanley_controller.py`) is a nonlinear geometric path-tracking law originally developed for the Stanford DARPA Grand Challenge vehicle *Stanley*. Unlike rear-axle lateral error regulators, Stanley computes cross-track error from the **front axle** (the steered wheel center) to the nearest point on the reference path and combines heading alignment with a velocity-scaled cross-track correction.
+### Route-history comparisons
 
-### Front-Axle Geometry
+![Rear-axle tracking error versus distance](results/final_rear_axle_error_comparison.png)
 
-Given rear-axle position $(x, y)$, vehicle yaw $\psi$, and wheelbase $L = 2.8\text{ m}$, the front-axle position $(x_{\text{fa}}, y_{\text{fa}})$ is:
+![Front-axle cross-track error versus distance](results/final_front_axle_error_comparison.png)
 
-$$
-x_{\text{fa}} = x + L \cos(\psi), \qquad y_{\text{fa}} = y + L \sin(\psi)
-$$
+![Applied steering angle](results/final_steering_angle_comparison.png)
 
-### Nearest Reference Waypoint and Cross-Track Error
+![Applied steering rate](results/final_steering_rate_comparison.png)
 
-Given discrete reference path waypoints $(x_{\text{ref}, i}, y_{\text{ref}, i})$ with tangent heading $\psi_{\text{ref}, i}$, the nearest waypoint index $i^*$ to the front axle is found via Euclidean distance:
+![Speed versus time](results/final_speed_comparison.png)
 
-$$
-i^* = \arg\min_i \left( (x_{\text{ref}, i} - x_{\text{fa}})^2 + (y_{\text{ref}, i} - y_{\text{fa}})^2 \right)
-$$
+### MPC timing on the CARLA test
 
-For the path unit tangent vector $\mathbf{t} = [\cos(\psi_{\text{ref}}), \sin(\psi_{\text{ref}})]^\top$, the local left unit normal vector is:
+- Prediction horizon: **15 steps × 0.05 s = 0.75 s**.
+- Mean / maximum reported OSQP solve time: **0.2091 / 0.6578 ms**.
+- Mean / maximum total controller computation time: **4.0738 / 11.4903 ms**.
+- Reported solver failures, fallbacks, and observed 50 ms controller deadline misses: **0** over 368 steps.
 
-$$
-\mathbf{n} = [-\sin(\psi_{\text{ref}}), \cos(\psi_{\text{ref}})]^\top
-$$
+These desktop measurements are not hard real-time guarantees.
 
-The signed front-axle cross-track error $e_{\text{fa}}$ is defined as:
+## Architecture
 
-$$
-e_{\text{fa}} = (\mathbf{p}_{\text{ref}} - \mathbf{p}_{\text{fa}}) \cdot \mathbf{n}
-$$
-
-Under this sign convention:
-- On a straight road ($y_{\text{ref}} = 0, \psi_{\text{ref}} = 0$), if $y > 0$ (vehicle left of centerline), $e_{\text{fa}} < 0$, commanding a negative (rightward) steering angle.
-- If $y < 0$ (vehicle right of centerline), $e_{\text{fa}} > 0$, commanding a positive (leftward) steering angle.
-
-### Heading Error Definition
-
-The heading error $\psi_e$ aligns the vehicle orientation with the local path tangent and is wrapped to $[-\pi, \pi]$:
-
-$$
-\psi_e = \operatorname{atan2}\!\left(\sin(\psi_{\text{ref}} - \psi),\ \cos(\psi_{\text{ref}} - \psi)\right)
-$$
-
-### Stanley Control Law
-
-The unconstrained steering command $\delta_{\text{cmd}}$ is:
-
-$$
-\delta_{\text{cmd}} = \psi_e + \operatorname{atan2}\!\left(\frac{k \, e_{\text{fa}}}{v + \epsilon}\right)
-$$
-
-where:
-- $k = 1.5\text{ s}^{-1}$ is the Stanley cross-track proportional gain (`stanley_gain`)
-- $v \ge 0\text{ m/s}$ is the forward vehicle speed
-- $\epsilon = 10^{-3}\text{ m/s}$ is a low-speed regularization constant preventing division by zero at near-standstill speeds
-
-### Steering Constraints
-
-All closed-loop simulations enforce identical physical actuator bounds at timestep $\Delta t = 0.1\text{ s}$:
-- **Maximum steering angle**: $|\delta| \le 30^\circ$ ($0.5236\text{ rad}$)
-- **Maximum steering rate**: $|\dot{\delta}| \le 20^\circ/\text{s}$ ($0.3491\text{ rad/s}$, or $2^\circ$ per $0.1\text{ s}$ timestep)
-
----
-
-## Phase 9: Pure Pursuit Path-Tracking Controller
-
-### Overview
-
-The Pure Pursuit controller (`src/controllers/pure_pursuit_controller.py`) is a geometric lookahead path-tracking law that computes the constant-curvature circular arc connecting the vehicle's **rear-axle reference point** $(x, y)$ to a target waypoint $(x_{\text{target}}, y_{\text{target}})$ located a lookahead distance $L_d$ ahead along the reference path.
-
-### Mathematical Derivation
-
-Given the rear-axle position $(x, y)$, vehicle yaw $\psi$, wheelbase $L = 2.8\text{ m}$, and selected target waypoint $(x_{\text{target}}, y_{\text{target}})$:
-
-1. **Heading-to-Target Error ($\alpha$)**:
-   $$
-   \alpha = \operatorname{atan2}\!\left(\sin(\tilde{\alpha}),\ \cos(\tilde{\alpha})\right), \qquad \tilde{\alpha} = \operatorname{atan2}(y_{\text{target}} - y,\ x_{\text{target}} - x) - \psi
-   $$
-
-2. **Actual Euclidean Lookahead Distance ($L_d$)**:
-   $$
-   L_d = \sqrt{(x_{\text{target}} - x)^2 + (y_{\text{target}} - y)^2}
-   $$
-
-3. **Pure Pursuit Steering Command ($\delta_{\text{cmd}}$)**:
-   By the law of sines on the isosceles triangle formed by the turning center, rear axle, and target point ($R = \dfrac{L_d}{2\sin(\alpha)}$) combined with kinematic bicycle curvature $\tan(\delta) = L / R$:
-   $$
-   \delta_{\text{cmd}} = \operatorname{atan2}\!\left(2 L \sin(\alpha),\ L_d\right)
-   $$
-
-### Cumulative Arc-Length Lookahead Target Selection
-
-To handle curved paths accurately without distorting lookahead distance along curved segments:
-1. Cumulative path arc length $s_i$ is computed across discrete waypoints:
-   $$
-   s_0 = 0, \qquad s_i = \sum_{j=1}^{i} \sqrt{(x_{\text{ref}, j} - x_{\text{ref}, j-1})^2 + (y_{\text{ref}, j} - y_{\text{ref}, j-1})^2}
-   $$
-2. The nearest waypoint index $i_{\text{near}}$ to the rear axle $(x, y)$ is identified while enforcing monotonic forward progression along the path.
-3. The target index $i_{\text{target}} \ge i_{\text{near}}$ is selected as the first waypoint ahead of the vehicle satisfying:
-   $$
-   s_{i_{\text{target}}} \ge s_{i_{\text{near}}} + L_{d,\text{desired}}
-   $$
-   while verifying positive forward projection in the vehicle's heading frame and clamping safely at path endpoints.
-
-### Fixed vs. Speed-Dependent Lookahead
-
-`PurePursuitController` supports two lookahead modes:
-- **Fixed Lookahead**: $L_{d,\text{desired}} = L_{d,\text{fixed}} = 10.0\text{ m}$
-- **Speed-Dependent Lookahead**:
-  $$
-  L_{d,\text{desired}}(v) = L_{\min} + K_v \, v
-  $$
-  with initial tuning parameters $L_{\min} = 3.0\text{ m}$ and $K_v = 0.5\text{ s}$.
-  - At low speeds ($v = 5\text{ m/s} \implies L_{d,\text{desired}} = 5.5\text{ m}$), a shorter lookahead reduces corner cutting and accelerates lateral error convergence compared to a $10.0\text{ m}$ fixed lookahead.
-  - At high speeds ($v = 30\text{ m/s} \implies L_{d,\text{desired}} = 18.0\text{ m}$), a longer lookahead prevents high-speed oscillatory instability under steering-rate constraints, at the trade-off of minor corner-cutting on curves.
-
----
-
-## Phase 10: Constrained Model Predictive Control (MPC)
-
-### Overview
-
-The Constrained MPC controller (`src/controllers/mpc_controller.py`) formulates lateral path tracking as a receding-horizon convex quadratic program (QP) solved at each control step using **CVXPY** and **OSQP**. Unlike memoryless feedback laws that clip steering commands after computation, the MPC controller incorporates the **applied steering angle as an internal state**, optimizes over a finite **steering-rate sequence**, previews upcoming **road curvature** over a $1.5\text{ s}$ horizon, and enforces hard physical bounds on both steering angle and steering rate directly inside the optimization problem.
-
-### State Vector, Control Input, and Continuous Error Model
-
-The augmented state vector $\mathbf{z} \in \mathbb{R}^3$ and scalar control input $u \in \mathbb{R}$ are:
-
-$$
-\mathbf{z} = \begin{bmatrix} e_y \\ e_\psi \\ \delta_{\text{applied}} \end{bmatrix}, \qquad u = \dot{\delta}_{\text{applied}}
-$$
-
-where:
-- $e_y = (\mathbf{p} - \mathbf{p}_{\text{ref}}) \cdot \mathbf{n} = -(x - x_{\text{ref}})\sin(\psi_{\text{ref}}) + (y - y_{\text{ref}})\cos(\psi_{\text{ref}})$ is the signed lateral error of the rear axle relative to the path's local left normal $\mathbf{n} = [-\sin(\psi_{\text{ref}}), \cos(\psi_{\text{ref}})]^\top$
-- $e_\psi = \operatorname{atan2}(\sin(\psi - \psi_{\text{ref}}),\ \cos(\psi - \psi_{\text{ref}}))$ is the heading error relative to the local path tangent
-- $\delta_{\text{applied}}$ is the physical front-wheel steering angle
-
-Under small-angle and constant-speed ($v$) assumptions, the continuous-time linearized path-tracking dynamics with road curvature $\kappa_{\text{ref}}$ are:
-
-$$
-\begin{aligned}
-\dot{e}_y &= v \, e_\psi \\
-\dot{e}_\psi &= \frac{v}{L} \delta_{\text{applied}} - v \, \kappa_{\text{ref}} \\
-\dot{\delta}_{\text{applied}} &= u
-\end{aligned}
-$$
-
-### Discrete-Time Prediction Model (Exact Zero-Order Hold)
-
-Discretizing over timestep $\Delta t = 0.1\text{ s}$ via exact Zero-Order Hold (ZOH) matrix integration yields:
-
-$$
-\mathbf{z}[k+1] = A_d \mathbf{z}[k] + B_d u[k] + \mathbf{d}[k]
-$$
-
-with:
-
-$$
-A_d = \begin{bmatrix} 1 & v \Delta t & \dfrac{v^2 \Delta t^2}{2 L} \\[6pt] 0 & 1 & \dfrac{v \Delta t}{L} \\[6pt] 0 & 0 & 1 \end{bmatrix}, \qquad
-B_d = \begin{bmatrix} \dfrac{v^2 \Delta t^3}{6 L} \\[6pt] \dfrac{v \Delta t^2}{2 L} \\[6pt] \Delta t \end{bmatrix}, \qquad
-\mathbf{d}[k] = E_d \, \kappa_{\text{ref}}[k] = \begin{bmatrix} -\dfrac{1}{2} v^2 \Delta t^2 \, \kappa_{\text{ref}}[k] \\[6pt] -v \Delta t \, \kappa_{\text{ref}}[k] \\[6pt] 0 \end{bmatrix}
-$$
-
-### Road Curvature Preview Over Horizon
-
-Over the $N = 15$ step horizon ($1.5\text{ s}$ lookahead duration at $\Delta t = 0.1\text{ s}$), future reference positions along the road are predicted via:
-
-$$
-x_{\text{ref}}[k+1] = x_{\text{ref}}[k] + v \cos(\psi_{\text{ref}}[k]) \Delta t, \qquad k = 0, \dots, N-1
-$$
-
-and the analytical road curvature $\kappa_{\text{ref}}[k] = \kappa_{\text{road}}(x_{\text{ref}}[k])$ is evaluated at each predicted future coordinate.
-
-### Finite-Horizon Convex Quadratic Program
-
-At each control step, the controller solves:
-
-$$
-\min_{u[0 \dots N-1],\ \mathbf{z}[0 \dots N]} \quad \sum_{k=0}^{N-1} \left( \mathbf{z}[k]^\top Q \mathbf{z}[k] + u[k]^\top R u[k] \right) + \mathbf{z}[N]^\top Q_f \mathbf{z}[N]
-$$
-
-subject to:
-
-$$
-\begin{aligned}
-\mathbf{z}[0] &= \mathbf{z}_{\text{init}} = [e_y(t),\ e_\psi(t),\ \delta_{\text{applied}}(t)]^\top \\
-\mathbf{z}[k+1] &= A_d \mathbf{z}[k] + B_d u[k] + \mathbf{d}[k], && k = 0, \dots, N-1 \\
--\delta_{\max} &\le \delta_{\text{applied}}[k] \le +\delta_{\max}, && k = 1, \dots, N \quad (\delta_{\max} = 30^\circ) \\
--u_{\max} &\le u[k] \le +u_{\max}, && k = 0, \dots, N-1 \quad (u_{\max} = 20^\circ/\text{s})
-\end{aligned}
-$$
-
-Initial experimental cost weights:
-- Stage state weight: $Q = \operatorname{diag}([10.0,\ 5.0,\ 1.0])$
-- Stage steering-rate weight: $R = \begin{bmatrix} 1.0 \end{bmatrix}$
-- Terminal state weight: $Q_f = \operatorname{diag}([20.0,\ 10.0,\ 2.0])$
-
-Only the first optimal steering-rate command $u^*[0]$ is applied at each step and integrated to update $\delta_{\text{applied}}(t + \Delta t) = \delta_{\text{applied}}(t) + u^*[0]\Delta t$.
-
-### Solver Architecture and Deterministic Failure Handling
-
-- **Parametric Pre-Compilation & Warm Starting**: The CVXPY problem is constructed once with `cp.Parameter` objects (`z0` and `kappa_ref`) and pre-canonicalized at initialization so online steps update parameter values and warm-start **OSQP** directly (~$0.16\text{–}0.23\text{ ms}$ mean OSQP solve time; ~$2.0\text{–}2.3\text{ ms}$ mean total controller time, well within the $100\text{ ms}$ control period).
-- **Deterministic Fallback**: If OSQP reports infeasibility, fails to converge, raises an exception, or receives non-finite inputs, the failure is logged (`solver_failure_count`), `used_fallback` is flagged, and a bounded proportional-heading stabilizing rate (`compute_fallback_control()`) strictly respecting $|\delta| \le 30^\circ$ and $|\dot{\delta}| \le 20^\circ/\text{s}$ is applied.
-
----
-
-## Comparison: Baseline PID vs. Augmented LQR vs. Stanley vs. Pure Pursuit vs. MPC
-
-| Characteristic | Baseline (PID + Heading) | Augmented LQR | Stanley Controller | Pure Pursuit Controller | Constrained MPC |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Reference Point** | Rear axle $(x, y)$ | Rear axle $(x, y)$ | Front axle $(x_{\text{fa}}, y_{\text{fa}})$ | Rear axle $(x, y)$ | Rear axle $(x, y)$ |
-| **Control Law Type** | Linear error feedback | Infinite-horizon optimal state feedback | Nonlinear local geometric feedback | Geometric lookahead chord arc fitting | Finite-horizon constrained QP optimization |
-| **Preview Capability** | None | None | None | Single target point at $L_d$ | Multi-step curvature preview ($N = 15$) |
-| **Actuator Constraints** | External post-clipping | Penalized in $Q, R$; clipped externally | External post-clipping | External post-clipping | Hard inequality constraints on $\delta[k]$ and $u[k]$ inside QP |
-| **Computational Cost** | $\mathcal{O}(1)$ ($\sim\mu\text{s}$) | $\mathcal{O}(1)$ online after offline DARE ($\sim\mu\text{s}$) | $\mathcal{O}(M)$ waypoint search | $\mathcal{O}(M)$ waypoint search | Iterative QP solve ($\sim 2\text{ ms}$ mean total time) |
-
-Each controller presents engineering trade-offs:
-- **Constrained MPC** anticipates upcoming road curvature changes across the $1.5\text{ s}$ horizon and accounts for hard steering-angle ($\pm 30^\circ$) and steering-rate ($\pm 20^\circ/\text{s}$) saturation during trajectory planning, achieving the lowest curved-road RMSE ($0.3537\text{ m}$ at $30\text{ m/s}$) and sub-$4\text{ mm}$ final error, at the cost of higher computational complexity and dependence on an online numerical solver.
-- **Augmented LQR** provides optimal state feedback with negligible online compute once the Discrete Algebraic Riccati Equation is solved offline, but cannot enforce hard state/input inequality constraints or preview multi-step curvature changes without a preview-state extension.
-- **Stanley** and **Pure Pursuit** require no matrix optimization or numerical QP solvers and operate directly on geometric paths, making them lightweight and reliable, though less capable of co-optimizing actuator rate limits and multi-step curvature preview.
-
----
-
-## Running Simulations and Tests
-
-### Run Controller Simulations
-
-```bash
-# Straight-road Baseline vs. Augmented LQR comparison
-python src/compare_controllers.py
-
-# Sinusoidal curved-road reference generation (Phase 7)
-python src/curved_road_simulation.py
-
-# Stanley straight & curved road multi-speed simulation (Phase 8)
-python src/stanley_simulation.py
-
-# Pure Pursuit straight & curved road multi-speed simulation (Phase 9)
-python src/pure_pursuit_simulation.py
-
-# Constrained MPC straight & curved road multi-speed simulation (Phase 10)
-python src/mpc_simulation.py
+```text
+CARLA map waypoints ──> route profile / curvature ─────┐
+                                                       v
+CARLA Tesla ──> transforms / velocity ──> CARLA adapter ──> tracking state
+    ^                                                       |
+    |                                                       v
+    |                                         controller selection:
+    |                                    Baseline | Stanley | Pure Pursuit
+    |                                         Augmented LQR | MPC
+    |                                                       |
+    └──── throttle / brake + normalized steering <──────────┘
+                  |
+                  v
+           telemetry, metrics, tests, plots
 ```
 
-### Run Automated Pytest Suite
+The `CarlaControllerAdapter` converts CARLA's right-positive lateral / clockwise-positive yaw convention to the controller's left-positive lateral / counterclockwise-positive convention. It also uses wheel positions from live vehicle physics to locate the rear axle and converts controller steering angles to normalized CARLA commands with the required sign reversal. The Tesla's reported front-wheel maximum is 70°; the normalized mapping is nominal and CARLA's speed-dependent steering curve can alter effective response.
 
-```bash
+## Models and controllers
+
+### Vehicle and road model
+
+The offline kinematic bicycle model uses rear-axle position $(x,y)$, heading $\psi$, wheelbase $L=2.8\,\mathrm{m}$, speed $v$, and front-wheel steering $\delta$:
+
+$$
+\dot x=v\cos\psi,\qquad \dot y=v\sin\psi,\qquad
+\dot\psi=\frac{v}{L}\tan\delta.
+$$
+
+The sinusoidal reference is $y_{\mathrm{ref}}(x)=A\sin(kx)$ with defaults $A=2\,\mathrm{m}$ and $k=0.02\,\mathrm{rad/m}$. Its heading and curvature are
+
+$$
+\psi_{\mathrm{ref}}=\arctan(Ak\cos kx),\qquad
+\kappa_{\mathrm{ref}}=\frac{-Ak^2\sin(kx)}{[1+(Ak\cos kx)^2]^{3/2}}.
+$$
+
+The CARLA integrations use the Tesla's measured wheelbase, approximately **3.0046 m**, rather than the offline 2.8 m default.
+
+### Error and sign conventions
+
+In controller coordinates, $X$ points along the initial forward direction, $Y$ points left, positive yaw is counterclockwise, and positive steering turns left. With reference tangent heading $\psi_{\mathrm{ref}}$, define the left normal $\mathbf n=[-\sin\psi_{\mathrm{ref}},\cos\psi_{\mathrm{ref}}]^T$.
+
+For rear-axle tracking, $e_y=(\mathbf p_{\mathrm{rear}}-\mathbf p_{\mathrm{ref}})\cdot\mathbf n$ and $e_\psi=\operatorname{wrap}(\psi-\psi_{\mathrm{ref}})$. **Stanley's control cross-track error uses the opposite displacement order at the front axle**, $e_{\mathrm{fa}}=(\mathbf p_{\mathrm{ref}}-\mathbf p_{\mathrm{front}})\cdot\mathbf n$. These definitions must not be conflated when interpreting telemetry.
+
+### Baseline feedback
+
+Uses `PIDController` with $K_p=0.05$, $K_i=K_d=0$, and heading gain $K_\psi=0.8$. For curved-road CARLA tracking, the steering command is
+
+$$\delta_{\mathrm{cmd}}=\arctan(L\kappa_{\mathrm{ref}})-K_pe_y-K_\psi e_\psi.$$
+
+The requested angle is then subjected to angle and rate limits.
+
+### Stanley
+
+Stanley evaluates front-axle position $\mathbf p_{\mathrm{front}}=(x+L\cos\psi,\,y+L\sin\psi)$ and a nearest path point. With heading correction $\psi_e=\operatorname{wrap}(\psi_{\mathrm{ref}}-\psi)$:
+
+$$
+\delta_{\mathrm{cmd}}=\psi_e+\operatorname{atan2}(k_s e_{\mathrm{fa}},v+\epsilon).
+$$
+
+Offline defaults: $k_s=1.5\,\mathrm{s}^{-1}$ and $\epsilon=10^{-3}\,\mathrm{m/s}$. The CARLA integration reuses the controller and adapter.
+
+### Pure Pursuit
+
+Selects a forward target using cumulative reference-path arc length. From the **rear axle**, let $L_d$ be the actual Euclidean distance to the selected target and $\alpha$ the wrapped target-bearing minus vehicle heading:
+
+$$\delta_{\mathrm{cmd}}=\operatorname{atan2}(2L\sin\alpha,L_d).$$
+
+The project supports fixed lookahead (10 m) and speed-dependent desired lookahead $L_{d,\mathrm{desired}}=3.0+0.5v$ (meters with $v$ in m/s). Actual target distance may differ because waypoints are discrete and the path curves.
+
+### Augmented LQR
+
+Uses state $z=[e_y,e_\psi,\delta]^T$ and steering-rate input $u=\dot\delta$, with feedback $u=-Kz$ in the original straight-road formulation. The CARLA version uses deviation steering $\delta-\delta_{\mathrm{ff}}$ and a feedforward steering-rate term derived from route curvature:
+
+$$\delta_{\mathrm{ff}}=\arctan(L\kappa_{\mathrm{ref}}),\qquad
+u=u_{\mathrm{feedback}}+\frac{d\delta_{\mathrm{ff}}}{dt}.$$
+
+The existing gains were retained; the reported CARLA test showed a larger sustained-curve offset than Stanley or MPC.
+
+### Constrained MPC
+
+MPC optimizes steering rate over a finite horizon with augmented state $z=[e_y,e_\psi,\delta]^T$:
+
+$$
+\min_{u_0,\ldots,u_{N-1}}\sum_{k=0}^{N-1}(z_k^TQz_k+u_k^TRu_k)+z_N^TQ_fz_N
+$$
+
+subject to discrete tracking dynamics and hard bounds $|\delta_k|\le30^\circ$, $|u_k|\le20^\circ/\mathrm{s}$. Weights are $Q=\mathrm{diag}(10,5,1)$, $R=1$, and $Q_f=\mathrm{diag}(20,10,2)$. The solver is CVXPY + OSQP with warm starting and a documented fallback on failure. The offline simulation uses a 0.1 s step (1.5 s horizon); CARLA uses 0.05 s (0.75 s horizon), with matrices recalculated for that timestep.
+
+## Development milestones
+
+| Stage | Outcome |
+|---|---|
+| 1–6 | Vehicle model, baseline feedback, LQR, augmented LQR, initial comparison and tests |
+| 7 | Curved-road position, heading, and curvature reference |
+| 8 | Stanley geometric tracking |
+| 9 | Pure Pursuit lookahead tracking |
+| 10 | Constrained MPC |
+| 11 | CARLA API, vehicle geometry adapter, waypoint route, and all five closed-loop controller integrations |
+| 12 | Initial five-controller comparison and telemetry plots completed; additional robustness scenarios, unified benchmark harness, documentation, and video finalization remain |
+
+## Setup
+
+### Offline Python simulation
+
+Use a compatible Python environment with dependencies from `requirements.txt`:
+
+```powershell
+python -m pip install -r requirements.txt
+python src/compare_controllers.py
+python src/curved_road_simulation.py
+python src/stanley_simulation.py
+python src/pure_pursuit_simulation.py
+python src/mpc_simulation.py
 python -m pytest tests -v
 ```
 
----
+### CARLA integration on Windows
 
-## Performance Metrics Reported (`src/stanley_simulation.py`, `src/pure_pursuit_simulation.py`, & `src/mpc_simulation.py`)
+1. Install and launch the **CARLA 0.9.16 Windows simulator** separately from this repository. The project was tested against `Town10HD_Opt` on `127.0.0.1:2000`.
+2. Use the project's separate **Python 3.12** virtual environment for CARLA; keep the original offline environment separate if it uses another Python version.
+3. Install the CARLA Python API and the project dependencies into the CARLA environment (verify compatibility before installation):
 
-1. **Lateral RMSE (m)**: Root-mean-square lateral error relative to the reference path
-2. **Max Lateral Error (m)**: Peak absolute lateral error
-3. **Final Lateral Error (m)**: Terminal absolute lateral error at $t = 10\text{ s}$
-4. **Settling Time (s) & Overshoot (m / %)**: Time to enter and stay within $\pm 0.05\text{ m}$ and peak centerline overshoot
-5. **Front-Axle CTE RMSE / Max Cross-Track Error (m)**: Reported in Stanley simulation for front-axle geometric tracking
-6. **Lookahead Distance Statistics (m)**: Desired, mean, minimum, and maximum actual Euclidean lookahead distance $L_d$ reported in Pure Pursuit simulation
-7. **Max Steering (deg) & Steering RMS (deg)**: Peak and root-mean-square applied steering angle
-8. **Max Steering Rate (deg/s)**: Peak applied steering rate (including step 0 from $0^\circ$)
-9. **Final Heading Error (deg)**: Terminal heading alignment error $|\psi - \psi_{\text{ref}}|$
-10. **Solver & Controller Timing (ms)**: Mean and maximum OSQP solver time and total controller computation time per step (reported in MPC simulation)
-11. **Solver Failures / Constraint Violations / Non-Finite Values**: Verification counters for solver reliability, actuator bounds, and numerical stability
+```powershell
+.\.venv-carla\Scripts\Activate.ps1
+python -m pip install carla==0.9.16
+python -m pip install -r requirements.txt
+python src/carla_integration/test_connection.py
+```
 
----
+4. With CARLA running and the correct map loaded, execute **one** controller at a time:
 
-## Known Limitations
+```powershell
+python src/carla_integration/baseline_carla.py
+python src/carla_integration/stanley_carla.py
+python src/carla_integration/pure_pursuit_carla.py
+python src/carla_integration/augmented_lqr_carla.py
+python src/carla_integration/mpc_carla.py
+```
 
-1. **Linearized Small-Angle Prediction Model**: The MPC internal prediction model linearizes $\sin(e_\psi) \approx e_\psi$ and $\tan(\delta) \approx \delta$ around the reference path and assumes constant longitudinal speed $v$ across the $1.5\text{ s}$ horizon.
-2. **Computational Overhead vs. Algebraic Controllers**: Solving a constrained QP via CVXPY + OSQP requires $\sim 2.0\text{–}2.3\text{ ms}$ mean total controller time per step (vs. microseconds for LQR, Stanley, or Pure Pursuit), though it remains well below the $100\text{ ms}$ ($\Delta t = 0.1\text{ s}$) control period.
-3. **Discrete Waypoint Quantization (Stanley & Pure Pursuit)**: Nearest-waypoint and arc-length target selection operate on discrete waypoints rather than continuous spline interpolation.
-4. **Pure Pursuit Corner Cutting**: Large lookahead distances at high speeds cut across the inside of sinusoidal curves.
-5. **Kinematic Bicycle Assumption**: Tire slip angles, lateral force saturation, and roll dynamics are neglected across all current phases, limiting physical fidelity at high lateral accelerations.
+**Caution:** Some integration scripts may have configurable scenarios or default to a short route. Check their current configuration and output filenames before rerunning so prior telemetry is not overwritten. Use a single synchronous-mode CARLA controller client at a time; scripts should restore world settings and clean up actors after exit.
+
+### Analysis without CARLA
+
+With the telemetry CSVs already saved in `results/`, CARLA does not need to be running:
+
+```powershell
+python src/final_controller_analysis.py
+python src/final_telemetry_comparison.py
+```
+
+## Repository guide
+
+```text
+src/
+  vehicle.py, road.py
+  controllers/
+    pid_controller.py
+    lqr_controller.py
+    augmented_lqr_controller.py
+    stanley_controller.py
+    pure_pursuit_controller.py
+    mpc_controller.py
+  carla_integration/
+    carla_adapter.py
+    baseline_carla.py
+    stanley_carla.py
+    pure_pursuit_carla.py
+    augmented_lqr_carla.py
+    mpc_carla.py
+  final_controller_analysis.py
+  final_telemetry_comparison.py
+tests/
+results/
+README.md
+requirements.txt
+```
+
+## Testing and reproducibility
+
+Run:
+
+```powershell
+python -m pytest tests -v
+```
+
+The most recently reported complete suite passed **257 tests**. The existing CARLA integration tests include mock-based checks for geometry, sign conventions, steering constraints, route continuity, stopping logic, and cleanup. Passing tests do **not** establish performance in all road or traffic conditions.
+
+The current CARLA table consolidates measured outputs from separate controller-specific scripts. Before publishing definitive cross-scenario claims, verify identical route sampling, error-sign conventions, stopping thresholds, scenario configurations, and telemetry processing. A unified benchmark harness and additional speed, offset, and disturbance scenarios are planned.
+
+## Known limitations
+
+- **Model mismatch:** Offline control design uses a kinematic bicycle; CARLA includes more detailed vehicle physics, speed-dependent steering response, and tire effects.
+- **Simplified steering conversion:** Normalized CARLA steering is mapped from desired front-wheel angle using the measured nominal maximum and a sign reversal; effective angle may vary with speed and physics settings.
+- **Discrete route representation:** Waypoint selection and curvature differentiation can introduce quantization and steering-rate ripple; some CARLA route profiling applies Gaussian spatial smoothing.
+- **Controller tuning:** Gains and cost weights are initial configurations, not jointly optimized for robustness or fairness across multiple routes.
+- **MPC model:** Small-error linearization and constant nominal speed over its horizon; desktop timing is not a hard real-time guarantee.
+- **Coverage:** The headline benchmark covers one route at one target speed. No sensor perception, ACC, blind-spot detection, or automated lane-change function is included.
+
+## Next steps and project endpoint
+
+1. Create a unified, repeatable CARLA benchmark runner using shared scenario configuration and metrics.
+2. Validate all five controllers on selected speed, lateral-offset, curvature, and disturbance scenarios.
+3. Audit telemetry-based metrics and document failure cases as well as successful runs.
+4. Record a CARLA demonstration and finalize the technical report.
+
+**Project completion criterion:** A reproducible five-controller benchmark with transparent results, passing regression tests, a documented limitation analysis, and a short demonstration video. Radar-based ACC, blind-spot detection, and lane-change assistance are reserved for a separate follow-on ADAS project.
