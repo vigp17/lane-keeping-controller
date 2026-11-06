@@ -2,28 +2,43 @@
 
 **Python · CARLA 0.9.16 · Stanley · Pure Pursuit · Augmented LQR · Constrained MPC · pytest**
 
-A modular lateral path-tracking project progressing from an offline kinematic bicycle model to closed-loop validation of **five controllers** in CARLA. The project evaluates tracking accuracy, steering smoothness, actuator limits, speed sensitivity, and recovery from an initial lateral displacement.
+A simulation-based lateral-control project progressing from a kinematic bicycle model to five closed-loop controller integrations in CARLA. The project compares tracking accuracy, steering smoothness, actuator constraints, speed sensitivity, and an initial-offset recovery experiment.
 
-> **Scope:** Simulation-based research and engineering validation—not a production-ready or safety-certified autonomous-driving system. Metrics below are reported from executed CARLA experiments and their telemetry summaries. Tests cover one reference route and limited conditions; they do not establish safety or robustness in arbitrary traffic and weather.
+> **Scope:** This is a simulation and validation portfolio project, not a production-ready or safety-certified autonomous-driving system. Results below are taken from reported CARLA runs and telemetry summaries; they do not establish performance in arbitrary traffic, road, or weather conditions.
 
 ## Highlights
 
-- **Five CARLA-integrated controllers:** Baseline lateral + heading feedback with curvature feedforward, Stanley, Pure Pursuit, augmented LQR, and constrained MPC.
-- **15 successful speed-benchmark runs:** five controllers at **5, 8, and 10 m/s** target speeds.
-- **One additional recovery experiment:** Stanley at **8 m/s**, starting **1 m left of the reference path**.
-- **CARLA environment:** Tesla Model 3 in `Town10HD_Opt`, physics-derived wheelbase **3.0046 m**.
-- **Common route:** **135.24 m**, including a sustained approximately 90° right-hand curve with minimum radius **37.66 m**.
-- **Control constraints:** **±30°** applied front-wheel steering, **±20°/s** steering rate, **0.05 s** synchronous timestep.
-- **Reported outcomes:** All 15 speed runs and the Stanley offset run completed the route, with **zero detected collisions** and **zero reported applied-steering constraint violations**.
-- **Automated validation:** **264 tests passed** in the latest reported run (`python -m pytest tests -q`).
+- **Five controllers:** Baseline lateral/heading feedback with curvature feedforward, Stanley, Pure Pursuit, augmented LQR, and constrained MPC.
+- **15 speed-benchmark runs:** all five controllers completed the same route at target speeds of **5, 8, and 10 m/s**.
+- **Additional recovery test:** Stanley at 8 m/s with a **+1 m initial lateral offset**.
+- **Environment:** CARLA 0.9.16, Tesla Model 3, `Town10HD_Opt`, physics-derived wheelbase **3.0046 m**.
+- **Route:** 135.24 m, including a 60.22 m sustained right-hand curve (minimum radius approximately 37.66 m).
+- **Actuator constraints:** applied steering **±30°**, applied steering rate **±20°/s**, synchronous timestep **0.05 s**.
+- **Reported outcome:** all 16 runs completed with **zero detected collisions** and **zero reported applied-steering constraint violations**.
+- **Tests:** latest reported full suite: **264 passed in 42.39 s**.
 
 ![Five-controller comparison at 8 m/s](results/final_controller_comparison.png)
 
-## Results: Five Controllers Across Three Speeds
+## Benchmark Configuration
 
-**Test route:** `Town10HD_Opt`, spawn point **61**, lane 1, road sequence **10 → 0 → 3**, 277 waypoints spaced approximately 0.5 m. Segments: **57.50 m straight approach**, **60.22 m sustained curve**, **17.51 m straight exit**. Each run used the same vehicle blueprint, target route, 0.05 s control timestep, steering constraints, and longitudinal speed-controller design.
+| Parameter | Value |
+|---|---|
+| Map | `Town10HD_Opt` |
+| Vehicle | `vehicle.tesla.model3` |
+| Spawn point | 61 |
+| Route | Lane 1; roads 10 → 0 → 3 |
+| Waypoints | 277, approximately 0.5 m spacing |
+| Route length | 135.24 m |
+| Straight approach / sustained curve / straight exit | 57.50 / 60.22 / 17.51 m |
+| Target speeds | 5, 8, 10 m/s |
+| Timestep | 0.05 s |
+| Steering angle / rate limits | ±30° / ±20°/s |
 
-### Rear-axle tracking RMSE (m) — lower is better
+The controller-specific runs use the same nominal route, vehicle, steering constraints, and longitudinal controller design. Results were gathered from separate executions; their initial conditions and metrics should be audited from raw telemetry before drawing broader statistical conclusions.
+
+## Multi-Speed Tracking Results
+
+### Rear-axle tracking RMSE (m; lower is better)
 
 | Controller | 5 m/s | 8 m/s | 10 m/s |
 |---|---:|---:|---:|
@@ -33,7 +48,7 @@ A modular lateral path-tracking project progressing from an offline kinematic bi
 | Augmented LQR | 0.0837 | 0.1873 | 0.2583 |
 | Baseline feedback + feedforward | 0.1604 | 0.2847 | 0.3540 |
 
-### Front-axle cross-track RMSE (m) — lower is better
+### Front-axle cross-track RMSE (m; lower is better)
 
 | Controller | 5 m/s | 8 m/s | 10 m/s |
 |---|---:|---:|---:|
@@ -43,9 +58,9 @@ A modular lateral path-tracking project progressing from an offline kinematic bi
 | Augmented LQR | 0.1496 | 0.2315 | 0.2913 |
 | Baseline feedback + feedforward | 0.2238 | 0.3276 | 0.3861 |
 
-### Steering smoothness at 8 m/s
+### Steering effort at 8 m/s
 
-| Controller | Steering RMS (°) | Steering-rate RMS (°/s) | Maximum steering rate (°/s) |
+| Controller | Steering RMS (°) | Steering-rate RMS (°/s) | Peak steering rate (°/s) |
 |---|---:|---:|---:|
 | Stanley | 3.3415 | 4.4192 | 14.8446 |
 | Constrained MPC | 3.4207 | 2.6930 | 12.5964 |
@@ -53,13 +68,11 @@ A modular lateral path-tracking project progressing from an offline kinematic bi
 | Augmented LQR | 3.3987 | 2.4933 | 15.2076 |
 | Baseline feedback + feedforward | 3.4049 | 2.8547 | 20.0000 |
 
-**Interpretation:** At 5 m/s, MPC had the lowest rear-axle RMSE while Stanley had the lowest front-axle RMSE. At 8 m/s, Stanley had the lowest error by both measures. At 10 m/s, MPC had the lowest RMSE by both measures, although Stanley had smaller **peak** rear- and front-axle deviations. Pure Pursuit had the lowest steering-rate RMS in the 8 m/s benchmark. All five controllers showed increasing overall tracking error as target speed increased on this route. These comparisons are specific to the tested tuning and road geometry; they are not universal rankings.
+**Interpretation:** At 5 m/s, MPC had the lowest rear-axle RMSE and Stanley had the lowest front-axle RMSE. At 8 m/s, Stanley had the lowest RMSE on both measures. At 10 m/s, MPC had the lowest RMSE on both measures, while Stanley had smaller peak deviations. Pure Pursuit had the lowest steering-rate RMS in the 8 m/s run. These are **scenario-specific** findings, not universal rankings.
 
-### Curved-road tracking and recovery
+### Sustained-curve rear-axle RMSE at 10 m/s
 
-At 10 m/s, the sustained-curve rear-axle RMSE values were:
-
-| Controller | Curved-segment rear RMSE (m) |
+| Controller | RMSE (m) |
 |---|---:|
 | Stanley | 0.1587 |
 | Constrained MPC | **0.1432** |
@@ -67,85 +80,83 @@ At 10 m/s, the sustained-curve rear-axle RMSE values were:
 | Augmented LQR | 0.3925 |
 | Baseline | 0.5270 |
 
-The original 8 m/s zero-offset benchmark and the additional offset-recovery run use the same route but answer different questions: steady tracking versus transient recovery.
+## Stanley +1 m Initial-Offset Recovery
 
-### Stanley +1 m initial lateral-offset experiment
+A separate test started the Tesla approximately 1 m left of the reference lane centerline, with nominally aligned initial heading and an 8 m/s target speed. The original Stanley gain was retained.
 
-A separate run started the Tesla approximately **1.0 m left** of the reference path, with aligned initial heading and **8 m/s** target speed. The controller was **not retuned** for recovery.
-
-| Metric | Zero-offset Stanley, 8 m/s | +1 m offset Stanley, 8 m/s |
+| Metric | Zero offset | +1 m offset |
 |---|---:|---:|
 | Rear-axle RMSE | 0.0488 m | 0.4542 m |
 | Front-axle CTE RMSE | 0.0915 m | 0.4896 m |
 | Maximum absolute rear-axle error | 0.0942 m | 1.1020 m |
 | Maximum absolute front-axle CTE | 0.1527 m | 1.3000 m |
-| Maximum heading error | — | 15.67° |
+| Maximum heading error | Not tabulated | 15.67° |
 | Maximum applied steering | 5.8144° | 20.0000° |
 | Maximum applied steering rate | 14.8446°/s | 20.0000°/s |
 | Route completed | Yes | Yes |
 | Detected collisions | 0 | 0 |
 
-The offset run showed **substantial oscillatory overshoot** during the initial straight-road recovery. The Stanley law generated a very large low-speed steering request (maximum reported requested magnitude **89.57°**), while the applied steering was bounded by angle and rate limits. As speed and heading error evolved, steering reversals lagged the requested correction. The rear-axle error changed sign repeatedly before decaying. By the sustained curve, rear-axle RMSE was **0.0688 m**, close to **0.0682 m** for the zero-offset run. The vehicle completed the route with no detected collision. **This is evidence of recovery in one simulation, not proof of robust stability.**
+The offset run showed **oscillatory overshoot** on the initial straight. At low speed, the Stanley law requested a large steering correction (peak reported requested magnitude **89.57°**). Angle and rate constraints limited applied steering, and delayed steering reversals contributed to repeated centerline crossings. During the sustained curve, rear-axle RMSE was **0.0688 m**, close to the zero-offset curve result of **0.0682 m**. This demonstrates recovery in this particular simulation, **not a general stability guarantee**.
 
-The 5 cm settling-time and recovery-distance metrics have **not yet been calculated** from the raw offset telemetry; they are intentionally not claimed here.
+Settling time and recovery distance under a sustained ±0.05 m criterion have **not yet been calculated** from raw telemetry.
 
 ![Stanley offset-recovery trajectory](results/phase12b_stanley_offset_1m_8ms_trajectory.png)
 
-![Stanley offset-recovery cross-track error](results/phase12b_stanley_offset_1m_8ms_cross_track_error.png)
+![Stanley offset-recovery error](results/phase12b_stanley_offset_1m_8ms_cross_track_error.png)
 
-### MPC computation time
+## MPC Computational Performance
 
-The CARLA MPC uses a **15-step horizon × 0.05 s = 0.75 s** with CVXPY and OSQP.
+The CARLA MPC uses **15 prediction steps × 0.05 s = 0.75 s**, CVXPY, and OSQP.
 
-| Target speed | Mean OSQP solve (ms) | Max OSQP solve (ms) | Mean total control (ms) | Max total control (ms) | Reported solver failures | Observed deadline misses (>50 ms) |
+| Target speed | Mean OSQP (ms) | Max OSQP (ms) | Mean total controller (ms) | Max total controller (ms) | Solver failures | Observed >50 ms misses |
 |---|---:|---:|---:|---:|---:|---:|
 | 5 m/s | 0.7611 | 2.2250 | 4.3762 | 8.4010 | 0 | 0 |
 | 8 m/s | 0.2091 | 0.6578 | 4.0738 | 11.4903 | 0 | 0 |
 | 10 m/s | 0.2147 | 0.5658 | 4.1621 | 7.5572 | 0 | 0 |
 
-Desktop execution meeting an observed 50 ms budget is **not** a hard real-time guarantee on automotive hardware.
+Observed desktop timing within a 50 ms control period does **not** imply hard real-time guarantees on embedded hardware.
 
-### 8 m/s telemetry visualizations
+## Comparison Plots (8 m/s)
 
-![Rear-axle error versus route distance](results/final_rear_axle_error_comparison.png)
+![Rear-axle tracking error](results/final_rear_axle_error_comparison.png)
 
-![Front-axle CTE versus route distance](results/final_front_axle_error_comparison.png)
+![Front-axle cross-track error](results/final_front_axle_error_comparison.png)
 
-![Applied steering angle versus route distance](results/final_steering_angle_comparison.png)
+![Applied steering angle](results/final_steering_angle_comparison.png)
 
-![Applied steering rate versus route distance](results/final_steering_rate_comparison.png)
+![Applied steering rate](results/final_steering_rate_comparison.png)
 
-![Vehicle speed versus time](results/final_speed_comparison.png)
+![Vehicle speed](results/final_speed_comparison.png)
 
-> **Plot note:** The `final_*` comparison images were generated from the original **8 m/s** telemetry. They are not multi-speed plots. The plotted signed errors may differ by controller convention; use absolute errors or consistently normalized signs when comparing traces.
+> The `final_*` images represent the **original 8 m/s runs**, not the full multi-speed sweep. Signed cross-track errors use different conventions in some controller integrations; use sign-normalized data or error magnitudes for overlays.
 
 ## System Architecture
 
 ```text
-CARLA map waypoints --> route extraction / curvature profile ----+
-                                                               |
-CARLA Tesla --> vehicle transforms / speed --> CARLA adapter ---+--> tracking state
-                                                                      |
-                                                  +-------------------+-------------------+
-                                                  |                   |                   |
-                                               Baseline           Stanley          Pure Pursuit
-                                                  |                   |                   |
-                                                  +--------- Augmented LQR / MPC --------+
-                                                                      |
-                                                        steering command / rate
-                                                                      |
-                                                steering limits + CARLA conversion
-                                                                      |
-                                                 throttle / brake + steering --> Tesla
-                                                                      |
-                                                 telemetry --> metrics --> plots/tests
+CARLA map waypoints --> route extraction / curvature estimation
+                                      |
+CARLA Tesla --> CARLA adapter --> tracking state / reference errors
+                                      |
+                 +--------------------+---------------------+
+                 |          |          |          |          |
+              Baseline    Stanley    Pure       Augmented    MPC
+                                   Pursuit       LQR
+                 +----------+----------+----------+----------+
+                                      |
+                            Steering angle / rate
+                                      |
+                         Limits + CARLA conversion
+                                      |
+                      Vehicle throttle, brake, steering
+                                      |
+                       Telemetry --> metrics --> plots
 ```
 
-`CarlaControllerAdapter` converts CARLA coordinates to the controller convention, uses live vehicle geometry to identify front- and rear-axle reference points, and converts desired front-wheel steering to normalized CARLA steering with the appropriate sign. The reported nominal maximum front-wheel steering angle is **70°**; effective response can vary with CARLA's speed-dependent steering behavior.
+`CarlaControllerAdapter` uses live physics geometry to identify the front and rear axle, transforms CARLA coordinates to the controller convention, and maps desired steering to normalized CARLA input. The nominal maximum front-wheel angle is approximately **70°**, but effective steering response can depend on speed and vehicle physics settings.
 
-## Models and Controllers
+## Control Models and Algorithms
 
-### Offline vehicle and road model
+### Kinematic bicycle and reference road
 
 The offline kinematic bicycle model uses rear-axle position $(x,y)$, yaw $\psi$, wheelbase $L=2.8\,\mathrm{m}$, speed $v$, and front-wheel steering $\delta$:
 
@@ -155,96 +166,114 @@ $$
 \dot{\psi}=\frac{v}{L}\tan\delta.
 $$
 
-The offline sinusoidal road reference is $y_{\mathrm{ref}}(x)=A\sin(kx)$, with heading and curvature:
+For an offline sinusoidal reference $y_{\mathrm{ref}}(x)=A\sin(kx)$:
 
 $$
-\psi_{\mathrm{ref}}=\arctan(Ak\cos kx),\qquad
-\kappa_{\mathrm{ref}}=\frac{-Ak^2\sin(kx)}{\left[1+(Ak\cos kx)^2\right]^{3/2}}.
+\psi_{\mathrm{ref}}=\arctan(Ak\cos(kx)),\qquad
+\kappa_{\mathrm{ref}}=\frac{-Ak^2\sin(kx)}{\left[1+(Ak\cos(kx))^2\right]^{3/2}}.
 $$
 
-The CARLA integrations use the Tesla's measured wheelbase **3.0046 m**, not the offline default **2.8 m**. Offline simulation uses a **0.1 s** timestep; CARLA uses **0.05 s**.
+CARLA uses the measured Tesla wheelbase **3.0046 m** instead of the offline **2.8 m** default. Offline simulations use a **0.1 s** timestep, while the CARLA integrations use **0.05 s**.
 
-### Coordinate and error conventions
+### Error and sign conventions
 
-In controller coordinates, global $X$ points along the initial forward road direction, $Y$ points left, positive yaw is counterclockwise, and positive steering turns left. For reference heading $\psi_{\mathrm{ref}}$, the local left normal is $\mathbf n=[-\sin\psi_{\mathrm{ref}},\cos\psi_{\mathrm{ref}}]^T$.
+In controller coordinates, $X$ points along the initial road direction, $Y$ points left, positive yaw is counterclockwise, and positive steering turns left. The local left normal to a reference heading $\psi_{\mathrm{ref}}$ is:
 
-For the baseline, augmented LQR, and MPC, rear-axle lateral error is:
+$$
+\mathbf{n}=\begin{bmatrix}-\sin\psi_{\mathrm{ref}}\\\cos\psi_{\mathrm{ref}}\end{bmatrix}.
+$$
 
-$$e_y=(\mathbf p_{\mathrm{rear}}-\mathbf p_{\mathrm{ref}})\cdot\mathbf n.$$
+The rear-axle lateral error used by baseline, augmented LQR, and MPC is:
 
-Stanley's front-axle control error uses the opposite displacement order:
+$$
+e_y=(\mathbf{p}_{\mathrm{rear}}-\mathbf{p}_{\mathrm{ref}})\cdot\mathbf{n}.
+$$
 
-$$e_{\mathrm{fa}}=(\mathbf p_{\mathrm{ref}}-\mathbf p_{\mathrm{front}})\cdot\mathbf n.$$
+Stanley's front-axle error uses the opposite displacement order:
 
-The Stanley rear-error telemetry also follows its controller-specific sign convention. RMSE and absolute error are sign-invariant, but signed traces require normalization for cross-controller comparison.
+$$
+e_{\mathrm{fa}}=(\mathbf{p}_{\mathrm{ref}}-\mathbf{p}_{\mathrm{front}})\cdot\mathbf{n}.
+$$
+
+Stanley's rear-error telemetry also follows a controller-specific sign convention. RMSE and absolute errors are invariant to sign, but signed traces must be normalized for comparison.
 
 ### Baseline feedback with curvature feedforward
 
 The baseline reuses `PIDController` with $K_p=0.05$, $K_i=K_d=0$, and heading gain $K_\psi=0.8$:
 
-$$\delta_{\mathrm{cmd}}=\arctan(L\kappa_{\mathrm{ref}})-K_pe_y-K_\psi e_\psi.$$
+$$
+\delta_{\mathrm{cmd}}=\arctan(L\kappa_{\mathrm{ref}})-K_pe_y-K_\psi e_\psi.
+$$
 
-This is **proportional lateral + heading feedback**, not a fully tuned three-term PID. Angle and rate limits are applied after the command is computed.
+This is **proportional lateral and heading feedback**, not a fully tuned three-term PID. Steering angle and rate are constrained after the command is computed.
 
 ### Stanley
 
-Using the front-axle reference point $\mathbf p_{\mathrm{front}}=(x+L\cos\psi,\,y+L\sin\psi)$ and heading correction $\psi_e=\operatorname{wrap}(\psi_{\mathrm{ref}}-\psi)$:
+With front-axle position $\mathbf{p}_{\mathrm{front}}=(x+L\cos\psi,\,y+L\sin\psi)$ and wrapped heading correction:
 
-$$\delta_{\mathrm{cmd}}=\psi_e+\operatorname{atan2}(k_s e_{\mathrm{fa}},v+\epsilon).$$
+$$
+\psi_e=\mathrm{atan2}\!\left(\sin(\psi_{\mathrm{ref}}-\psi),\cos(\psi_{\mathrm{ref}}-\psi)\right),
+$$
 
-The tested gain was $k_s=1.5\,\mathrm{s}^{-1}$ with low-speed regularization $\epsilon=10^{-3}\,\mathrm{m/s}$. The +1 m recovery experiment illustrates that aggressive low-speed requests and external steering-rate limits can lead to an oscillatory transient.
+$$
+\delta_{\mathrm{cmd}}=\psi_e+\arctan\!\left(\frac{k_s e_{\mathrm{fa}}}{v+\epsilon}\right).
+$$
+
+The tested gain is $k_s=1.5\,\mathrm{s}^{-1}$ and low-speed regularization is $\epsilon=10^{-3}\,\mathrm{m/s}$. The +1 m offset test highlights large initial steering requests and oscillatory recovery under rate constraints.
 
 ### Pure Pursuit
 
-Pure Pursuit selects a forward target by cumulative path arc length. From the rear axle, let $L_d$ be the actual Euclidean target distance and $\alpha$ the wrapped bearing error:
+Pure Pursuit chooses a target ahead along cumulative path arc length. From the rear axle, let $L_d$ be the Euclidean distance to the selected target and $\alpha$ the wrapped bearing error:
 
-$$\delta_{\mathrm{cmd}}=\operatorname{atan2}(2L\sin\alpha,L_d).$$
+$$
+\delta_{\mathrm{cmd}}=\arctan\!\left(\frac{2L\sin\alpha}{L_d}\right).
+$$
 
-The implementation supports fixed lookahead (10 m) and dynamic desired lookahead $L_{d,\mathrm{desired}}=3.0+0.5v$ (meters when $v$ is in m/s). Discrete waypoint selection makes actual Euclidean lookahead differ from desired lookahead.
+The implementation supports fixed lookahead (10 m) and dynamic desired lookahead $L_{d,\mathrm{desired}}=3.0+0.5v$ (meters when $v$ is in m/s). Actual Euclidean lookahead can differ due to waypoint spacing and road curvature.
 
 ### Augmented LQR
 
-Uses state $z=[e_y,e_\psi,\delta]^T$ and steering-rate input $u=\dot\delta$. The original straight-road feedback is $u=-Kz$. The CARLA integration uses deviation steering $\delta-\delta_{\mathrm{ff}}$ and feedforward steering rate:
+The augmented state is $z=[e_y,e_\psi,\delta]^T$ and the input is steering rate $u=\dot\delta$. The CARLA integration uses steering deviation relative to curvature feedforward:
 
-$$\delta_{\mathrm{ff}}=\arctan(L\kappa_{\mathrm{ref}}),\qquad
-u=u_{\mathrm{feedback}}+\frac{d\delta_{\mathrm{ff}}}{dt}.$$
+$$
+\delta_{\mathrm{ff}}=\arctan(L\kappa_{\mathrm{ref}}),\qquad
+u=u_{\mathrm{feedback}}+\frac{d\delta_{\mathrm{ff}}}{dt}.
+$$
 
-The gain is computed for each configured nominal speed; cost weights were not systematically retuned for the CARLA vehicle's dynamics.
+The feedback gain is computed for the configured nominal speed. Cost weights were not systematically retuned for the CARLA vehicle's dynamic response.
 
 ### Constrained MPC
 
-MPC optimizes steering rate over a receding horizon with state $z=[e_y,e_\psi,\delta]^T$:
+MPC optimizes steering rate over a finite horizon with state $z=[e_y,e_\psi,\delta]^T$:
 
 $$
 \min_{u_0,\ldots,u_{N-1}}
-\sum_{k=0}^{N-1}(z_k^TQz_k+u_k^TRu_k)+z_N^TQ_fz_N
+\sum_{k=0}^{N-1}\left(z_k^TQz_k+u_k^TRu_k\right)+z_N^TQ_fz_N
 $$
 
-subject to discrete tracking dynamics and hard bounds $|\delta_k|\le30^\circ$, $|u_k|\le20^\circ/\mathrm{s}$. Cost weights: $Q=\operatorname{diag}(10,5,1)$, $R=1$, $Q_f=\operatorname{diag}(20,10,2)$. The solver uses CVXPY + OSQP with warm starting and bounded fallback behavior on solver failure. Offline prediction uses **15 × 0.1 s = 1.5 s**; CARLA uses **15 × 0.05 s = 0.75 s**, with the prediction model constructed for the actual timestep and nominal speed.
+subject to discrete prediction dynamics and hard bounds $|\delta_k|\le30^\circ$ and $|u_k|\le20^\circ/\mathrm{s}$. Weights: $Q=\mathrm{diag}(10,5,1)$, $R=1$, and $Q_f=\mathrm{diag}(20,10,2)$. CVXPY + OSQP provides the QP solve, with warm starting and fallback handling. The offline horizon is **15 × 0.1 s = 1.5 s**; CARLA uses **15 × 0.05 s = 0.75 s** with matrices constructed for the actual timestep and nominal speed.
 
 ## Development Milestones
 
-| Phase | Completed work |
+| Phase | Work |
 |---|---|
-| 1–6 | Kinematic vehicle model, baseline feedback, LQR, augmented LQR, offline comparison and tests |
-| 7 | Curved-road position, heading, and curvature reference |
-| 8 | Stanley path tracking |
-| 9 | Pure Pursuit lookahead tracking |
+| 1–6 | Kinematic model, baseline, LQR, augmented LQR, offline comparison and tests |
+| 7 | Curved-road reference generation |
+| 8 | Stanley |
+| 9 | Pure Pursuit |
 | 10 | Constrained MPC |
-| 11 | CARLA adapter, waypoint route, and all five controller integrations |
+| 11 | CARLA adapter and five controller integrations |
 | 12A | Unified benchmark metrics and consistency checks |
-| 12B | Five controllers at 5, 8, and 10 m/s; Stanley +1 m offset recovery |
+| 12B | 5, 8, 10 m/s tests and Stanley +1 m offset recovery |
 | 12D | Comparison charts and telemetry analysis |
-| 12E | README and technical documentation |
+| 12E | Technical documentation |
 | 12F | CARLA demonstration recordings |
 
-Additional disturbance/noise testing and a fully parameterized multi-scenario harness were proposed but **not claimed complete**.
+Further disturbance/noise tests and a fully parameterized multi-scenario runner were proposed but are **not claimed complete**.
 
-## Setup and Reproduction
+## Installation and Reproduction
 
-### Offline Python simulations
-
-From the repository root, install the project's dependencies in a compatible environment:
+### Offline simulations
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -258,9 +287,7 @@ python -m pytest tests -q
 
 ### CARLA 0.9.16 on Windows
 
-1. Launch the CARLA 0.9.16 simulator and load `Town10HD_Opt` on `127.0.0.1:2000`.
-2. Activate the existing Python 3.12 CARLA virtual environment and ensure the CARLA Python API and project dependencies are installed.
-3. Run one controller client at a time; use unique `file_prefix` values to preserve existing results.
+Launch CARLA with `Town10HD_Opt` on `127.0.0.1:2000`. Activate the CARLA Python environment, then run one controller at a time:
 
 ```powershell
 .\.venv-carla\Scripts\Activate.ps1
@@ -271,28 +298,25 @@ python src/carla_integration/augmented_lqr_carla.py
 python src/carla_integration/mpc_carla.py
 ```
 
-These default entry points reproduce each script's configured default scenario. For speed sweeps, call the exported runner functions with explicit `target_speed_mps` and unique prefixes. Example:
+Use unique output prefixes to avoid overwriting prior results. For a speed-specific run, invoke the exported runner with an explicit target speed:
 
 ```powershell
 python -c "import sys; from pathlib import Path; sys.path.insert(0,'src'); from carla_integration import stanley_carla; s=stanley_carla.run_stanley_carla_test(target_speed_mps=10.0, file_prefix='phase12b_stanley_10ms', results_dir=Path('results')); print(s)"
 ```
 
-The Stanley +1 m offset integration uses `initial_lateral_offset_m=1.0` and must verify the initial rear-axle position and spawn clearance before driving. The other four runner interfaces were **not** extended for initial-offset tests in the reported work.
+The Stanley +1 m test uses `initial_lateral_offset_m=1.0`, with initial-position verification and spawn-clearance checks. The other four runner interfaces were not extended for offset tests in the reported work.
 
-### Unified benchmark and plotting
+### Benchmark and plots from saved telemetry
 
 ```powershell
-# Recalculate the original five-controller 8 m/s metrics from saved CSVs
 python src/carla_integration/unified_benchmark.py
-
-# Regenerate the original 8 m/s comparison images
 python src/final_controller_analysis.py
 python src/final_telemetry_comparison.py
 ```
 
-**Caution:** The existing unified benchmark's `--live` cleanup implementation may remove all world vehicles and sensors, including actors not created by this project. Do not use `--live` in a shared CARLA session without narrowing cleanup to benchmark-owned actors. Its offline evaluation of historical CSVs also assumes successful termination/collision-free status unless separately verified against saved run summaries.
+**Caution:** The existing `unified_benchmark.py --live` cleanup code can remove all vehicles and sensors in the CARLA world, including actors belonging to other clients. Do not run `--live` in a shared simulator until cleanup is restricted to benchmark-owned actors. Its offline evaluation also assumes successful historical termination and zero collisions unless separately verified from run summaries.
 
-### Repository Guide
+## Repository Structure
 
 ```text
 src/
@@ -321,32 +345,32 @@ README.md
 requirements.txt
 ```
 
-## Testing and Reproducibility
+## Testing
 
-The latest user-reported complete suite was:
+The latest reported complete suite was:
 
 ```text
 264 passed in 42.39s
 ```
 
-The tests include mock-based geometry, coordinate/sign conversion, steering constraints, route continuity, controller integration, cleanup, and benchmark schema/metric checks. Passing these tests does not validate all dynamic or traffic scenarios. The multi-speed results above come from separate controller-specific CARLA runs with shared nominal conditions; a single parameterized multi-scenario runner and independent audit of all raw telemetry remain optional improvements.
+Tests include mock-based checks for geometry, coordinate conversion, steering constraints, route continuity, stopping logic, controller integration, cleanup, and benchmark metrics. Passing tests does not validate every physical driving condition.
 
-## Known Limitations
+## Limitations
 
-- **Single route:** The speed comparison uses one 135.24 m route and one vehicle blueprint; broader generalization requires additional maps, curves, surfaces, and conditions.
-- **Model mismatch:** Offline controllers rely on simplified bicycle dynamics; CARLA includes more detailed tire and vehicle behavior and speed-dependent steering response.
-- **Steering mapping:** Nominal front-wheel angle-to-CARLA steering conversion is not a complete steering actuator model.
-- **Different control reference points and sign conventions:** Stanley uses front-axle error; the others principally use rear-axle error. Both metrics are reported to improve fairness, but signed telemetry must be normalized for overlays.
-- **Waypoint representation:** Discrete waypoint selection and curvature differentiation can cause quantization and steering ripple; some integrations smooth the curvature profile.
-- **Initial tuning:** Baseline, LQR, Pure Pursuit, and MPC parameters were not systematically optimized across all scenarios.
-- **Recovery transient:** The untuned Stanley +1 m experiment produced oscillatory overshoot and reached the 20°/s steering-rate limit. Recovery time and distance are not yet formally quantified.
-- **MPC prediction and timing:** Linearized constant-nominal-speed prediction and desktop solver timing are not production real-time guarantees.
-- **No perception or highway ADAS:** ACC, radar-based blind-spot detection, and lane-change assistance are reserved for a separate follow-on project.
+- **One map and route:** Broader validation requires different road geometries, conditions, and vehicle configurations.
+- **Model mismatch:** Offline control design uses simplified kinematic dynamics; CARLA simulates more detailed vehicle behavior and speed-dependent steering response.
+- **Steering conversion:** Nominal angle-to-normalized-CARLA conversion is not a full actuator dynamics model.
+- **Reference points and signs:** Stanley's control error is front-axle-based; other controllers principally regulate rear-axle error. Signed telemetry conventions differ.
+- **Discrete waypoints:** Quantization and curvature differentiation can introduce steering ripple; some integrations smooth curvature spatially.
+- **Initial tuning:** Gains and cost weights were not jointly optimized across speeds and routes.
+- **Recovery transient:** Stanley's +1 m test showed large oscillatory overshoot and reached the 20°/s rate limit; formal settling time and recovery distance are not yet reported.
+- **MPC:** Linearized constant-nominal-speed prediction and desktop solver timing do not imply hard real-time embedded performance.
+- **Scope:** Radar-based ACC, blind-spot detection, and lane-change assistance are not included.
 
-## Project Status and Future Work
+## Project Status
 
-**Portfolio scope: complete.** Five controllers were implemented, integrated into CARLA, tested at three speeds, and documented with telemetry, comparison plots, automated tests, and demonstration recordings. The offset test adds a documented transient-recovery limitation.
+**The scoped simulation-based portfolio project is complete.** Five controllers were integrated into CARLA and evaluated at three speeds, with an additional Stanley offset-recovery test, automated tests, telemetry plots, and demonstration recordings.
 
-**Optional follow-up work:** independent telemetry audit, additional disturbance/noise tests, a shared scenario-configuration interface for all five controllers, measured settling-time/recovery-distance analysis, and consolidated demonstration-video editing. None is necessary to claim the scoped simulation portfolio deliverable, and none should be mistaken for production safety validation.
+Optional future improvements include raw-telemetry auditing, more disturbance/noise scenarios, a fully shared multi-scenario runner, recovery-settling metrics, and a consolidated demonstration video. These are not prerequisites for describing the current project accurately as a completed simulation portfolio exercise.
 
 **Next separate project:** Radar-based Adaptive Cruise Control, Blind Spot Detection, and Lane Change Assistance in CARLA.
